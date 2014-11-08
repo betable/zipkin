@@ -1,0 +1,4 @@
+target
+/sbt-launch.jar
+/zipkin.db
+/bin
