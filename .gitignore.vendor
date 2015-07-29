@@ -2,3 +2,5 @@ target
 /sbt-launch.jar
 /zipkin.db
 /bin
+build
+/.gradle
