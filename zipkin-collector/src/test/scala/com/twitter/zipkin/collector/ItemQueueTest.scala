@@ -15,13 +15,11 @@
  */
 package com.twitter.zipkin.collector
 
-import com.twitter.util.{Await, Future}
 import java.util.concurrent.{CountDownLatch, TimeUnit}
-import org.junit.runner.RunWith
-import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
+import com.twitter.util.{Await, Future}
+import org.scalatest.FunSuite
+
 class ItemQueueTest extends FunSuite {
   val Item = ()
 
@@ -67,7 +65,7 @@ class ItemQueueTest extends FunSuite {
     assert(processed.await(100, TimeUnit.MILLISECONDS))
   }
 
-  test("enfoces a max queue size") {
+  test("enforces a max queue size") {
     val queue = new ItemQueue[Unit, Unit](10, 0, { _ => Future.Unit })
     assert(Await.result(fill(queue, 10)))
     assert(Await.ready(queue.add(Item)).poll.get.isThrow)

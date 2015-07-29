@@ -15,19 +15,18 @@
  */
 package com.twitter.zipkin.web
 
-import com.twitter.finagle.http.Request
-import com.twitter.util.Time
+import com.twitter.finagle.httpx.Request
+import com.twitter.util.{Time, TwitterDateFormat}
 import com.twitter.zipkin.common.{AnnotationType, BinaryAnnotation}
 import com.twitter.zipkin.query.{Order, QueryRequest}
 import java.nio.ByteBuffer
-import java.text.SimpleDateFormat
 import java.util.{Calendar, Date}
 
-object QueryExtractor {
-  val fmt = new SimpleDateFormat("MM-dd-yyyy'T'HH:mm:ss.SSSZ")
+class QueryExtractor(defaultQueryLimit: Int) {
+  val fmt = TwitterDateFormat("MM-dd-yyyy'T'HH:mm:ss.SSSZ")
 
-  private[this] val dateFormat = new SimpleDateFormat("MM-dd-yyyy")
-  private[this] val timeFormat = new SimpleDateFormat("HH:mm")
+  private[this] val dateFormat = TwitterDateFormat("MM-dd-yyyy")
+  private[this] val timeFormat = TwitterDateFormat("HH:mm")
 
   def getDate(req: Request): Option[Date] =
     req.params.get("date").map(dateFormat.parse)
@@ -35,6 +34,14 @@ object QueryExtractor {
   def getDateStr(req: Request): String = {
     val date = getDate(req).getOrElse(Calendar.getInstance().getTime)
     dateFormat.format(date)
+  }
+
+  def getLimit(req: Request): Option[Int] = {
+    req.params.get("limit").map(_.toInt)
+  }
+
+  def getLimitStr(req: Request): String = {
+    getLimit(req).getOrElse(defaultQueryLimit).toString
   }
 
   def getTime(req: Request): Option[Date] =
@@ -86,7 +93,7 @@ object QueryExtractor {
 
     // traces are ordered in the UI itself. Using None means the query service wont lookup durations
     val order = Order.None
-    val limit = req.params.get("limit").map(_.toInt).getOrElse(Constants.DefaultQueryLimit)
+    val limit = getLimit(req).getOrElse(defaultQueryLimit)
     QueryRequest(serviceName, spanName, annotations, binaryAnnotations, timestamp, limit, order)
   }
 }

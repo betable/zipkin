@@ -23,7 +23,7 @@ import com.twitter.zipkin.common._
 import com.twitter.zipkin.storage.{IndexedTraceId, SpanStore, TraceIdDuration}
 import com.twitter.zipkin.util.Util
 import java.nio.ByteBuffer
-import java.sql.Connection
+import java.sql.{Connection, PreparedStatement}
 
 // TODO: connection pooling for real parallelism
 class AnormSpanStore(
@@ -39,6 +39,10 @@ class AnormSpanStore(
 
   def close(deadline: Time): Future[Unit] = pool {
     conn.close()
+  }
+
+  implicit object byteArrayToStatement extends ToStatement[Array[Byte]] {
+    def set(s: PreparedStatement, i: Int, b: Array[Byte]): Unit = s.setBytes(i, b)
   }
 
   private[this] val spanInsertSql = SQL("""
@@ -68,9 +72,14 @@ class AnormSpanStore(
 
   // store a list of spans
   def apply(spans: Seq[Span]): Future[Unit] = {
+    var hasSpans = false
+    var hasAnns = false
+    var hasBinAnns = false
+
     val init = (spanInsertSql, annInsertSql, binAnnInsertSql)
     val (spanBatch, annBatch, binAnnBatch) =
       spans.foldLeft(init) { case ((sb, ab, bb), span) =>
+        hasSpans = true
         val sbp = sb.addBatch(
           ("span_id" -> span.id),
           ("parent_id" -> span.parentId),
@@ -83,6 +92,7 @@ class AnormSpanStore(
 
         if (!shouldIndex(span)) (sbp, ab, bb) else {
           val abp = span.annotations.foldLeft(ab) { (ab, a) =>
+            hasAnns = true
             ab.addBatch(
               ("span_id" -> span.id),
               ("trace_id" -> span.traceId),
@@ -96,6 +106,7 @@ class AnormSpanStore(
           }
 
           val bbp = span.binaryAnnotations.foldLeft(bb) { (bb, b) =>
+            hasBinAnns = true
             bb.addBatch(
               ("span_id" -> span.id),
               ("trace_id" -> span.traceId),
@@ -114,9 +125,9 @@ class AnormSpanStore(
 
     // This parallelism is a lie. There's only one DB connection (for now anyway).
     Future.join(Seq(
-      pool { spanBatch.execute() },
-      pool { annBatch.execute() },
-      pool { binAnnBatch.execute() }
+      if (hasSpans) pool { spanBatch.execute() } else Future.Done,
+      if (hasAnns) pool { annBatch.execute() } else Future.Done,
+      if (hasBinAnns) pool { binAnnBatch.execute() } else Future.Done
     ))
   }
 
@@ -230,13 +241,13 @@ class AnormSpanStore(
     getSpansByTraceIds(Seq(traceId)).map(_.head)
 
   private[this] val idsByNameSql = SQL("""
-    |SELECT trace_id, MAX(a_timestamp)
+    |SELECT trace_id, MAX(a_timestamp) as "MAX(a_timestamp)"
     |FROM zipkin_annotations
     |WHERE service_name = {service_name}
     |  AND (span_name = {span_name} OR {span_name} = '')
     |  AND a_timestamp < {end_ts}
     |GROUP BY trace_id
-    |ORDER BY a_timestamp DESC
+    |ORDER BY MAX(a_timestamp) DESC
     |LIMIT {limit}
   """.stripMargin)
 
@@ -260,7 +271,7 @@ class AnormSpanStore(
   }
 
   private[this] val byAnnValSql = SQL("""
-    |SELECT zba.trace_id, s.created_ts
+    |SELECT zba.trace_id, MAX(s.created_ts) as "s.created_ts"
     |FROM zipkin_binary_annotations AS zba
     |LEFT JOIN zipkin_spans AS s
     |  ON zba.trace_id = s.trace_id
@@ -270,7 +281,7 @@ class AnormSpanStore(
     |  AND s.created_ts < {end_ts}
     |  AND s.created_ts IS NOT NULL
     |GROUP BY zba.trace_id
-    |ORDER BY s.created_ts DESC
+    |ORDER BY MAX(s.created_ts) DESC
     |LIMIT {limit}
   """.stripMargin)
 
@@ -280,13 +291,13 @@ class AnormSpanStore(
   ) map { case a~b => IndexedTraceId(a, b) }
 
   private[this] val byAnnSql = SQL("""
-    |SELECT trace_id, MAX(a_timestamp)
+    |SELECT trace_id, MAX(a_timestamp) as "MAX(a_timestamp)"
     |FROM zipkin_annotations
     |WHERE service_name = {service_name}
     |  AND value = {annotation}
     |  AND a_timestamp < {end_ts}
     |GROUP BY trace_id
-    |ORDER BY a_timestamp DESC
+    |ORDER BY MAX(a_timestamp) DESC
     |LIMIT {limit}
   """.stripMargin)
 
@@ -322,17 +333,17 @@ class AnormSpanStore(
     }
 
   private[this] def byDurationSql(ids: Seq[Long]) = SQL("""
-    |SELECT trace_id, duration, created_ts
-    |FROM zipkin_spans
-    |WHERE trace_id IN (%s) AND created_ts IS NOT NULL
+    |SELECT trace_id, MIN(a_timestamp), MAX(a_timestamp)
+    |FROM zipkin_annotations
+    |WHERE trace_id IN (%s)
     |GROUP BY trace_id
   """.stripMargin.format(ids.mkString(",")))
 
   private[this] val byDurationResults = (
     long("trace_id") ~
-    get[Option[Long]]("duration") ~
-    long("created_ts")
-  ) map { case a~b~c => TraceIdDuration(a, b.getOrElse(0), c) }
+    long("MIN(a_timestamp)") ~
+    long("MAX(a_timestamp)")
+  ) map { case traceId~minTs~maxTs => TraceIdDuration(traceId, maxTs - minTs, minTs) }
 
   def getTracesDuration(traceIds: Seq[Long]): Future[Seq[TraceIdDuration]] = pool {
     byDurationSql(traceIds)

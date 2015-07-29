@@ -17,16 +17,15 @@ package com.twitter.zipkin.web
 
 import com.twitter.app.App
 import com.twitter.conversions.time._
-import com.twitter.finagle.http.HttpMuxer
+import com.twitter.finagle.httpx.{HttpMuxer, Request, Response}
 import com.twitter.finagle.stats.{DefaultStatsReceiver, StatsReceiver}
-import com.twitter.finagle.{Http, Service, Thrift}
+import com.twitter.finagle.{Httpx, Service, Thrift}
 import com.twitter.server.TwitterServer
 import com.twitter.util.{Await, Future}
 import com.twitter.zipkin.common.json.ZipkinJson
 import com.twitter.zipkin.common.mustache.ZipkinMustache
-import com.twitter.zipkin.gen.ZipkinQuery
+import com.twitter.zipkin.thriftscala.ZipkinQuery
 import java.net.InetSocketAddress
-import org.jboss.netty.handler.codec.http.{HttpRequest, HttpResponse}
 
 trait ZipkinWebFactory { self: App =>
   private[this] val resourceDirs = Set(
@@ -55,16 +54,21 @@ trait ZipkinWebFactory { self: App =>
   val webPinTtl = flag("zipkin.web.pinTtl", 30.days, "Length of time pinned traces should exist")
 
   val queryDest = flag("zipkin.web.query.dest", "127.0.0.1:9411", "Location of the query server")
-  def newQueryClient(): ZipkinQuery[Future] =
-    Thrift.newIface[ZipkinQuery[Future]]("ZipkinQuery=" + queryDest())
+  val queryLimit = flag("zipkin.web.query.limit", 10, "Default query limit for trace results")
+
+  def newQueryClient(): ZipkinQuery.FutureIface =
+    Thrift.newIface[ZipkinQuery.FutureIface]("ZipkinQuery=" + queryDest())
+
+  def newJsonGenerator = new ZipkinJson
+  def newMustacheGenerator = new ZipkinMustache(webResourcesRoot(), webCacheResources())
+  def newQueryExtractor = new QueryExtractor(queryLimit())
+  def newHandlers = new Handlers(newJsonGenerator, newMustacheGenerator, newQueryExtractor)
 
   def newWebServer(
     queryClient: ZipkinQuery[Future] = newQueryClient(),
     stats: StatsReceiver = DefaultStatsReceiver.scope("zipkin-web")
-  ): Service[HttpRequest, HttpResponse] = {
-    val jsonGenerator = new ZipkinJson
-    val mustacheGenerator = new ZipkinMustache(webResourcesRoot(), webCacheResources())
-    val handlers = new Handlers(jsonGenerator, mustacheGenerator)
+  ): Service[Request, Response] = {
+    val handlers = newHandlers
     import handlers._
 
     val publicRoot = if (webCacheResources()) None else Some(webResourcesRoot())
@@ -73,7 +77,7 @@ trait ZipkinWebFactory { self: App =>
       ("/public/", handlePublic(resourceDirs, typesMap, publicRoot)),
       ("/", addLayout andThen handleIndex(queryClient)),
       ("/traces/:id", addLayout andThen handleTraces(queryClient)),
-      ("/realtime", addLayout andThen handleRealtime(queryClient)),
+      ("/aggregate", addLayout andThen handleAggregate(queryClient)),
       ("/api/query", handleQuery(queryClient)),
       ("/api/services", handleServices(queryClient)),
       ("/api/spans", requireServiceName andThen handleSpans(queryClient)),
@@ -91,7 +95,6 @@ trait ZipkinWebFactory { self: App =>
       val suffix = if (p.endsWith("/") || p.contains(":")) "/" else ""
 
       m.withHandler(handlePath.mkString("/") + suffix,
-        nettyToFinagle andThen
         collectStats(handlePath.foldLeft(stats) { case (s, p) => s.scope(p) }) andThen
         renderPage andThen
         catchExceptions andThen
@@ -103,7 +106,7 @@ trait ZipkinWebFactory { self: App =>
 
 object Main extends TwitterServer with ZipkinWebFactory {
   def main() {
-    val server = Http.serve(webServerPort(), newWebServer(stats = statsReceiver.scope("zipkin-web")))
+    val server = Httpx.serve(webServerPort(), newWebServer(stats = statsReceiver.scope("zipkin-web")))
     onExit { server.close() }
     Await.ready(server)
   }

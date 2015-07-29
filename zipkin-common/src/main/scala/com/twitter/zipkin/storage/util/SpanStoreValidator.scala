@@ -17,11 +17,12 @@ package com.twitter.zipkin.storage.util
 
 import com.twitter.conversions.time._
 import com.twitter.logging.Logger
-import com.twitter.util.{Await, Duration}
+import com.twitter.util.{Await, Duration, NonFatal}
 import com.twitter.zipkin.common._
 import com.twitter.zipkin.query.Trace
 import com.twitter.zipkin.storage.{TraceIdDuration, SpanStore}
 import java.nio.ByteBuffer
+import scala.language.reflectiveCalls
 
 class SpanStoreValidator(
   newSpanStore: => SpanStore,
@@ -78,7 +79,7 @@ class SpanStoreValidator(
       try {
         f(); println("  pass")
         true
-      } catch { case e: Throwable =>
+      } catch { case NonFatal(e) =>
         println("  fail")
         log.error(e, "validation failed")
         false
@@ -110,7 +111,7 @@ class SpanStoreValidator(
         case e: SpanStoreException =>
           println("  Caught exception %s (expected)".format(e))
           true
-        case x =>
+        case NonFatal(x) =>
           println("  Error: caught exception %s (unexpected)".format(x))
           false
       }
@@ -186,8 +187,8 @@ class SpanStoreValidator(
     val store = resetAndLoadStore(Seq(span1))
     Await.result(store.setTimeToLive(span1.traceId, 1234.seconds))
     // If a store doesn't use TTLs this should return Duration.Top
-    val allowedVals = Seq(1234.seconds, Duration.Top)
-    assert(allowedVals.contains(Await.result(store.getTimeToLive(span1.traceId))))
+    val ttl = Await.result(store.getTimeToLive(span1.traceId))
+    assert(ttl == Duration.Top || (ttl - 1234.seconds).abs.inMilliseconds <= 10)
   }
 
   test("check for existing traces") {
@@ -232,8 +233,10 @@ class SpanStoreValidator(
       val store2 = resetAndLoadStore(Seq(span4))
       assert(eq(Await.result(store2.getTracesDuration(Seq(999))), Seq(TraceIdDuration(999, 1, 6))))
 
-      Await.result(store2(Seq(span5)))
-      assert(eq(Await.result(store2.getTracesDuration(Seq(999))), Seq(TraceIdDuration(999, 3, 5))))
+      // Add another span which happens after the first in the trace. In this case, the trace
+      // duration be the sum, not the max of span durations.
+      Await.result(store2(Seq(span4.copy(annotations = List(ann7, ann8)))))
+      assert(eq(Await.result(store2.getTracesDuration(Seq(999))), Seq(TraceIdDuration(999, 2, 6 ))))
     }
   }
 
@@ -254,12 +257,12 @@ class SpanStoreValidator(
   }
 
   test("limit on annotations") {
-    val store = resetAndLoadStore(Seq(span1, span4, span5))
+    val spans = Seq(span1, span4, span5) // all have a "custom" annotation
+    val store = resetAndLoadStore(spans)
     val res1 = Await.result(store.getTraceIdsByAnnotation("service", "custom", None, 100, limit = 2))
 
     assert(eq(res1.length, 2))
-    assert(eq(res1(0).traceId, span1.traceId))
-    assert(eq(res1(1).traceId, span5.traceId))
+    assert(res1.map(s => s.traceId) forall (spans.map(s => s.traceId) contains))
   }
 
   test("wont index empty service names") {

@@ -15,15 +15,14 @@
  */
 package com.twitter.zipkin.query.conversions
 
-import com.twitter.zipkin.common._
-import com.twitter.zipkin.gen
-import com.twitter.zipkin.query.{Trace, TimelineAnnotation, TraceTimeline}
-import org.specs.Specification
-import org.specs.mock.{ClassMocker, JMocker}
 import java.nio.ByteBuffer
 
-class TraceTimelineSpec extends Specification with JMocker with ClassMocker {
+import com.twitter.zipkin.common._
+import com.twitter.zipkin.query.{TimelineAnnotation, Trace, TraceTimeline}
+import com.twitter.zipkin.thriftscala
+import org.scalatest.{FunSuite, Matchers}
 
+class TraceTimelineSpec extends FunSuite with Matchers {
 
 //T = 0	 koalabird-cuckoo	 ValuesFromSource	 Server receive	 10.34.238.111 ():9149
 //T + 1	 client	 multiget_slice	 Client send	 10.34.238.111 ():54147
@@ -64,12 +63,12 @@ class TraceTimelineSpec extends Specification with JMocker with ClassMocker {
 
   // This is from a real trace, at least what the data would look like
   // after being run through the TimeSkewAdjuster
-  val ann1 = Annotation(1, gen.Constants.SERVER_RECV, endpoint1)
-  val ann2 = Annotation(1, gen.Constants.CLIENT_SEND, endpoint2)
-  val ann3 = Annotation(1, gen.Constants.CLIENT_SEND, endpoint3)
-  val ann4 = Annotation(86, gen.Constants.SERVER_SEND, endpoint1)
-  val ann5 = Annotation(85, gen.Constants.CLIENT_RECV, endpoint2)
-  val ann6 = Annotation(87, gen.Constants.CLIENT_RECV, endpoint3)
+  val ann1 = Annotation(1, thriftscala.Constants.SERVER_RECV, endpoint1)
+  val ann2 = Annotation(1, thriftscala.Constants.CLIENT_SEND, endpoint2)
+  val ann3 = Annotation(1, thriftscala.Constants.CLIENT_SEND, endpoint3)
+  val ann4 = Annotation(86, thriftscala.Constants.SERVER_SEND, endpoint1)
+  val ann5 = Annotation(85, thriftscala.Constants.CLIENT_RECV, endpoint2)
+  val ann6 = Annotation(87, thriftscala.Constants.CLIENT_RECV, endpoint3)
 
   val ba1 = BinaryAnnotation("key1", ByteBuffer.wrap("value1".getBytes), AnnotationType.String, None)
 
@@ -84,32 +83,29 @@ class TraceTimelineSpec extends Specification with JMocker with ClassMocker {
   val trace = new Trace(List(span1, span2, span3))
 
   // annotation numbers match those above, order in list should not though
-  val tAnn1 = TimelineAnnotation(1, gen.Constants.SERVER_RECV, et1,
+  val tAnn1 = TimelineAnnotation(1, thriftscala.Constants.SERVER_RECV, et1,
     2209720933601260005L, None, cuckooName, "ValuesFromSource")
-  val tAnn2 = TimelineAnnotation(1, gen.Constants.CLIENT_SEND, et2,
+  val tAnn2 = TimelineAnnotation(1, thriftscala.Constants.CLIENT_SEND, et2,
     -855543208864892776L, Some(2209720933601260005L), cassieName, "multiget_slice")
-  val tAnn3 = TimelineAnnotation(1, gen.Constants.CLIENT_SEND, et3,
+  val tAnn3 = TimelineAnnotation(1, thriftscala.Constants.CLIENT_SEND, et3,
     2209720933601260005L, None, koalabirdName, "ValuesFromSource")
-  val tAnn4 = TimelineAnnotation(86, gen.Constants.SERVER_SEND, et1,
+  val tAnn4 = TimelineAnnotation(86, thriftscala.Constants.SERVER_SEND, et1,
     2209720933601260005L, None, cuckooName, "ValuesFromSource")
-  val tAnn5 = TimelineAnnotation(85, gen.Constants.CLIENT_RECV, et2,
+  val tAnn5 = TimelineAnnotation(85, thriftscala.Constants.CLIENT_RECV, et2,
     -855543208864892776L, Some(2209720933601260005L), cassieName, "multiget_slice")
-  val tAnn6 = TimelineAnnotation(87, gen.Constants.CLIENT_RECV, et3,
+  val tAnn6 = TimelineAnnotation(87, thriftscala.Constants.CLIENT_RECV, et3,
     2209720933601260005L, None, koalabirdName, "ValuesFromSource")
 
   val expectedTimeline = TraceTimeline(1, 2209720933601260005L, List(tAnn3, tAnn1, tAnn2,
     tAnn5, tAnn4, tAnn6), List(ba1))
 
-  "TraceTimelineSpec" should {
-    "convert to timeline with correct annotations ordering" in {
-      val actualTimeline = TraceTimeline(trace)
-      Some(expectedTimeline) mustEqual actualTimeline
-    }
-
-    "return none if empty trace" in {
-      val actualTimeline = TraceTimeline(new Trace(List()))
-      None mustEqual actualTimeline
-    }
+  test("convert to timeline with correct annotations ordering") {
+    val actualTimeline = TraceTimeline(trace)
+    actualTimeline should be (Some(expectedTimeline))
   }
 
+  test("return none if empty trace") {
+    val actualTimeline = TraceTimeline(new Trace(List()))
+    actualTimeline should be (None)
+  }
 }

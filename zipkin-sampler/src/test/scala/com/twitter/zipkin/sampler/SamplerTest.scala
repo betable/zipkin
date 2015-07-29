@@ -15,13 +15,11 @@
  */
 package com.twitter.zipkin.sampler
 
-import com.twitter.util.Var
 import java.util.Random
-import org.junit.runner.RunWith
-import org.scalatest.FunSuite
-import org.scalatest.junit.JUnitRunner
 
-@RunWith(classOf[JUnitRunner])
+import com.twitter.util.Var
+import org.scalatest.FunSuite
+
 class SamplerTest extends FunSuite {
   val rnd = new Random(1L)
 
@@ -41,8 +39,8 @@ class SamplerTest extends FunSuite {
 
   test("samples based on the given number") {
     val sampler = new Sampler(Var(0.5))
-    assert(sampler(0L))
-    assert(!sampler((Long.MaxValue * 0.5 + 1).toLong))
+    assert(sampler(Long.MaxValue))
+    assert(!sampler((Long.MaxValue * 0.5).toLong))
   }
 
   test("will update based on the given Var") {

@@ -17,7 +17,9 @@ define(
         var self = this;
 
         this.$node.find('.modal-title').text(
-          span.serviceNames + '.' + span.spanName + ': ' + span.durationStr);
+          span.serviceName + '.' + span.spanName + ': ' + span.durationStr);
+
+        this.$node.find('.service-names').text(span.serviceNames);
 
         var $annoBody = this.$node.find('#annotations tbody').text('');
         $.each(span.annotations, function(i, anno) {
@@ -27,6 +29,12 @@ define(
             $this.text(anno[$this.data('key')]);
           });
           $annoBody.append($row);
+        });
+
+        $annoBody.find(".local-datetime").each(function() {
+          var $this = $(this);
+          var timestamp = $this.text();
+          $this.text((new Date(parseInt(timestamp) / 1000)).toLocaleString());
         });
 
         var $binAnnoBody = this.$node.find('#binaryAnnotations tbody').text('');
