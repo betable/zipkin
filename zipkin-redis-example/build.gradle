@@ -1,12 +1,25 @@
 apply plugin: 'application'
+apply plugin: 'com.github.johnrengelman.shadow'
 mainClassName = 'com.twitter.zipkin.example.Main'
+
+if (!project.hasProperty("runArgs")) {
+    ext.runArgs =
+            '-zipkin.web.resourcesRoot=' + project(':zipkin-web').projectDir + '/src/main/resources'
+}
+
+run {
+    workingDir project.buildDir
+    args runArgs.split()
+}
+
+tasks.build.dependsOn(shadowJar)
+artifacts.archives shadowJar
 
 dependencies {
     compile project(':zipkin-web')
     compile project(':zipkin-redis')
     compile project(':zipkin-query')
     compile project(':zipkin-receiver-scribe')
-    compile project(':zipkin-zookeeper')
 
     compile "com.twitter:twitter-server_${scalaInterfaceVersion}:${commonVersions.twitterServer}"
     compile "com.twitter:finagle-zipkin_${scalaInterfaceVersion}:${commonVersions.finagle}"

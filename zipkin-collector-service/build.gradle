@@ -1,5 +1,16 @@
 apply plugin: 'application'
+apply plugin: 'com.github.johnrengelman.shadow'
 mainClassName = 'com.twitter.zipkin.collector.Main'
+
+run {
+    // Creates zipkin.db in the build directory when configKey == "dev"
+    workingDir project.buildDir
+    // See gradle.properties for an explanation of configKey
+    args '-f', "${projectDir}/config/collector-${configKey}.scala"
+}
+
+tasks.build.dependsOn(shadowJar)
+artifacts.archives shadowJar
 
 repositories {
     // For dependencies of zipkin-cassandra
@@ -7,7 +18,6 @@ repositories {
 }
 
 dependencies {
-    compile project(':zipkin-collector-core')
     compile project(':zipkin-collector-scribe')
     compile project(':zipkin-receiver-kafka')
     compile project(':zipkin-cassandra')
@@ -15,6 +25,5 @@ dependencies {
     compile project(':zipkin-anormdb')
 }
 
-sourceSets.test.resources {
-    srcDir 'config'
-}
+sourceSets.main.resources.srcDirs += ['config']
+apply from: "${rootDir}/gradle/idea-mark-config-dir-as-resource.gradle"

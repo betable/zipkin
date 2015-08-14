@@ -1,74 +1,86 @@
 package com.twitter.zipkin.storage.redis
 
-import com.twitter.zipkin.storage._
+import com.google.common.io.Closer
+import com.twitter.finagle.redis.Client
+import com.twitter.util.{Duration, Future}
 import com.twitter.zipkin.common.Span
+import com.twitter.zipkin.storage._
 import java.nio.ByteBuffer
 
-import com.twitter.util.{Duration, Future, Time}
-
-class RedisSpanStore ( val index : RedisIndex, val storage : RedisStorage ) extends SpanStore {
+/**
+ * @param client the redis client to use
+ * @param ttl expires keys older than this many seconds.
+ */
+class RedisSpanStore(client: Client, ttl: Option[Duration]) extends SpanStore {
+  private[this] val closer = Closer.create();
+  private[this] val index = closer.register(new RedisIndex(client, ttl))
+  private[this] val storage = closer.register(new RedisStorage(client, ttl))
 
   private[this] def call[T](f: => T): Future[T] = synchronized { Future(f) }
 
-  def close(deadline: Time): Future[Unit] = closeAwaitably {
-      call { storage.close() }.unit
-    }
+  /** For testing, clear this store. */
+  private[redis] def clear(): Future[Unit] = client.flushDB()
 
-    def apply(newSpans: Seq[Span]): Future[Unit] = Future.collect(newSpans.flatMap {
-        span =>
-          Seq(storage.storeSpan(span),
-          index.indexServiceName(span),
-          index.indexSpanNameByService(span),
-          index.indexTraceIdByServiceAndName(span),
-          index.indexSpanByAnnotations(span),
-          index.indexSpanDuration(span))
-      }).unit
+  override def close() = closer.close()
 
-    // Used for pinning
-    def setTimeToLive(traceId: Long, ttl: Duration): Future[Unit] = {
-      storage.setTimeToLive(traceId, ttl)
-    }
+  def apply(newSpans: Seq[Span]): Future[Unit] = Future.collect(newSpans.flatMap {
+    span =>
+      Seq(storage.storeSpan(span),
+        index.indexServiceName(span),
+        index.indexSpanNameByService(span),
+        index.indexTraceIdByServiceAndName(span),
+        index.indexSpanByAnnotations(span),
+        index.indexSpanDuration(span))
+  }).unit
 
-    def getTimeToLive(traceId: Long): Future[Duration] = {
-      storage.getTimeToLive(traceId)
-    }
+  // Used for pinning
+  def setTimeToLive(traceId: Long, ttl: Duration): Future[Unit] = {
+    storage.setTimeToLive(traceId, ttl)
+  }
 
-    def tracesExist(traceIds: Seq[Long]): Future[Set[Long]] = {
-      storage.tracesExist(traceIds)
-    }
+  def getTimeToLive(traceId: Long): Future[Duration] = {
+    storage.getTimeToLive(traceId)
+  }
 
-    def getSpansByTraceIds(traceIds: Seq[Long]): Future[Seq[Seq[Span]]] = {
-      storage.getSpansByTraceIds(traceIds)
-    }
+  override def getDataTimeToLive = Future.value(ttl.map(_.inSeconds).getOrElse(Int.MaxValue))
 
-    def getSpansByTraceId(traceId: Long): Future[Seq[Span]] = {
-      storage.getSpansByTraceId(traceId)
-    }
+  def tracesExist(traceIds: Seq[Long]): Future[Set[Long]] = {
+    storage.tracesExist(traceIds)
+  }
 
-    def getTraceIdsByName(
-                           serviceName: String,
-                           spanName: Option[String],
-                           endTs: Long,
-                           limit: Int
-                           ): Future[Seq[IndexedTraceId]] = {
-      index.getTraceIdsByName(serviceName, spanName, endTs, limit)
-    }
+  def getSpansByTraceIds(traceIds: Seq[Long]): Future[Seq[Seq[Span]]] = {
+    storage.getSpansByTraceIds(traceIds)
+  }
 
-    def getTraceIdsByAnnotation(serviceName: String,
-                                 annotation: String,
-                                 value: Option[ByteBuffer],
-                                 endTs: Long,
-                                 limit: Int
-                                 ): Future[Seq[IndexedTraceId]] = {
-      index.getTraceIdsByAnnotation(serviceName, annotation, value, endTs, limit)
-    }
+  def getSpansByTraceId(traceId: Long): Future[Seq[Span]] = {
+    storage.getSpansByTraceId(traceId)
+  }
 
-    def getTracesDuration(traceIds: Seq[Long]): Future[Seq[TraceIdDuration]] = index.getTracesDuration(traceIds)
+  def getTraceIdsByName(
+    serviceName: String,
+    spanName: Option[String],
+    endTs: Long,
+    limit: Int
+  ): Future[Seq[IndexedTraceId]] = {
+    index.getTraceIdsByName(serviceName, spanName, endTs, limit)
+  }
 
-    def getAllServiceNames: Future[Set[String]] = {
-      println("Getting service names")
-      index.getServiceNames
-    }
+  def getTraceIdsByAnnotation(
+    serviceName: String,
+    annotation: String,
+    value: Option[ByteBuffer],
+    endTs: Long,
+    limit: Int
+  ): Future[Seq[IndexedTraceId]] = {
+    index.getTraceIdsByAnnotation(serviceName, annotation, value, endTs, limit)
+  }
 
-    def getSpanNames(serviceName: String): Future[Set[String]] = index.getSpanNames(serviceName)
+  def getTracesDuration(traceIds: Seq[Long]): Future[Seq[TraceIdDuration]] = index.getTracesDuration(traceIds)
+
+  def getAllServiceNames: Future[Set[String]] = {
+    println("Getting service names")
+    index.getServiceNames
+  }
+
+  def getSpanNames(serviceName: String): Future[Set[String]] = index.getSpanNames(serviceName)
 }

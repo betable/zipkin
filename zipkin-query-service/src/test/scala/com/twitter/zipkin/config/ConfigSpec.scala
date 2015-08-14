@@ -15,11 +15,12 @@
  */
 package com.twitter.zipkin.config
 
-import com.twitter.io.TempFile
+import com.google.common.base.Charsets.UTF_8
+import com.google.common.io.Resources
+import com.twitter.finagle.ListeningServer
 import com.twitter.ostrich.admin.RuntimeEnvironment
 import com.twitter.util.Eval
 import com.twitter.zipkin.builder.Builder
-import com.twitter.zipkin.query.ZipkinQuery
 import org.scalatest.{FunSuite, Matchers}
 
 class ConfigSpec extends FunSuite with Matchers {
@@ -27,13 +28,16 @@ class ConfigSpec extends FunSuite with Matchers {
   val eval = new Eval
 
   test("validate query configs") {
-    val queryConfigFiles = Seq(
+    val configSource = Seq(
       "/query-dev.scala",
-      "/query-cassandra.scala"
-    ) map { TempFile.fromResourcePath(_) }
+      "/query-cassandra.scala",
+      "/query-redis.scala"
+    ) map { r =>
+      Resources.toString(getClass.getResource(r), UTF_8)
+    }
 
-    for (file <- queryConfigFiles) {
-      val config = eval[Builder[RuntimeEnvironment => ZipkinQuery]](file)
+    for (source <- configSource) {
+      val config = eval[Builder[RuntimeEnvironment => ListeningServer]](source)
       config should not be(Nil)
       config.apply()
     }

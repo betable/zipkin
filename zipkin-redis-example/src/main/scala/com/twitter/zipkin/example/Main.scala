@@ -1,7 +1,7 @@
 package com.twitter.zipkin.example
 
 import com.twitter.finagle.Httpx
-import com.twitter.server.{Closer, TwitterServer}
+import com.twitter.server.TwitterServer
 import com.twitter.util.{Await, Closable}
 import com.twitter.zipkin.common.Span
 import com.twitter.zipkin.conversions.thrift._
@@ -10,11 +10,9 @@ import com.twitter.zipkin.query.constants.DefaultAdjusters
 import com.twitter.zipkin.receiver.scribe.ScribeSpanReceiverFactory
 import com.twitter.zipkin.redis.RedisSpanStoreFactory
 import com.twitter.zipkin.web.ZipkinWebFactory
-import com.twitter.zipkin.zookeeper.ZooKeeperClientFactory
 import com.twitter.zipkin.{thriftscala => thrift}
 
-object Main extends TwitterServer with Closer
-  with ZooKeeperClientFactory
+object Main extends TwitterServer
   with ScribeSpanReceiverFactory
   with ZipkinWebFactory
   with RedisSpanStoreFactory
@@ -32,6 +30,6 @@ object Main extends TwitterServer with Closer
     closeOnExit(closer)
 
     println("running and ready")
-    Await.all(web, receiver, store)
+    Await.all(web, receiver)
   }
 }

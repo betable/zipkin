@@ -1,5 +1,6 @@
 package com.twitter.zipkin.web
 
+import com.google.common.io.ByteStreams
 import com.twitter.finagle.httpx.{Request, Response}
 import com.twitter.finagle.stats.{StatsReceiver, Stat}
 import com.twitter.finagle.tracing.SpanId
@@ -13,7 +14,6 @@ import com.twitter.zipkin.conversions.thrift._
 import com.twitter.zipkin.query.{SpanTimestamp, TraceCombo, TraceSummary, QueryRequest}
 import com.twitter.zipkin.thriftscala.{Adjust, ZipkinQuery}
 import java.io.{File, FileInputStream, InputStream}
-import org.apache.commons.io.IOUtils
 import scala.annotation.tailrec
 
 class Handlers(jsonGenerator: ZipkinJson, mustacheGenerator: ZipkinMustache, queryExtractor: QueryExtractor) {
@@ -45,14 +45,14 @@ class Handlers(jsonGenerator: ZipkinJson, mustacheGenerator: ZipkinMustache, que
 
   case class StaticRenderer(input: InputStream, typ: String) extends Renderer {
     private[this] val content = {
-      val bytes = IOUtils.toByteArray(input)
-      input.read(bytes)
+      val bytes = ByteStreams.toByteArray(input)
+      input.close()
       bytes
     }
 
     def apply(response: Response) {
       response.setContentType(typ)
-      response.content = Buf.ByteArray(content)
+      response.content = Buf.ByteArray.Owned(content)
     }
   }
 
@@ -75,28 +75,6 @@ class Handlers(jsonGenerator: ZipkinJson, mustacheGenerator: ZipkinMustache, que
           client.getTraceSummariesByIds(ids distinct, adjusters) map { _.map { _.toTraceSummary } }
       }
     }
-  }
-
-  private[this] def querySpanDurantions(
-    client: ZipkinQuery[Future],
-    queryRequest: QueryRequest
-  ): Future[collection.Map[String, Seq[Long]]] = {
-    client.getSpanDurations(
-      queryRequest.endTs,
-      queryRequest.serviceName,
-      queryRequest.spanName.getOrElse("")
-    )
-  }
-
-  private[this] def queryServiceNamesToTraceIds(
-    client: ZipkinQuery[Future],
-    queryRequest: QueryRequest
-  ): Future[collection.Map[String, Seq[Long]]] = {
-    client.getServiceNamesToTraceIds(
-      queryRequest.endTs,
-      queryRequest.serviceName,
-      queryRequest.spanName.getOrElse("")
-    )
   }
 
   private[this] def getServices(client: ZipkinQuery[Future]): Future[Seq[String]] =

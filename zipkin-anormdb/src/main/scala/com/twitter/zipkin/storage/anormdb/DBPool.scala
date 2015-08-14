@@ -22,7 +22,7 @@ import java.sql.Connection
 /**
  * Common database connection code.
  */
-trait DBPool {
+trait DBPool extends java.io.Closeable {
 
   val db: DB
 
@@ -32,7 +32,7 @@ trait DBPool {
   /**
    * Closes all database connections.
    */
-  def close() {
+  override def close() = {
     if (!openCon.isEmpty) {
       openCon.get.close()
     }

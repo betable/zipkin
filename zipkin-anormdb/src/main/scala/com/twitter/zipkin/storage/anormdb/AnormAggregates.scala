@@ -32,7 +32,9 @@ import AnormThreads.inNewThread
  * The top annotations methods are stubbed because they're not currently
  * used anywhere; that feature was never completed.
  */
-case class AnormAggregates(db: DB, openCon: Option[Connection] = None) extends Aggregates with DBPool {
+case class AnormAggregates(
+  val db: DB,
+  val openCon: Option[Connection] = None) extends Aggregates with DBPool {
 
   /**
    * Get the dependencies in a time range.

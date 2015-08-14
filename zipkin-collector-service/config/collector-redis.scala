@@ -13,16 +13,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+import com.twitter.finagle.builder.ClientBuilder
+import com.twitter.finagle.redis.{Redis, Client}
 import com.twitter.zipkin.builder.Scribe
 import com.twitter.zipkin.redis
 import com.twitter.zipkin.collector.builder.CollectorServiceBuilder
 import com.twitter.zipkin.storage.Store
 
+val client = Client(ClientBuilder().hosts("0.0.0.0:6379")
+                                   .hostConnectionLimit(4)
+                                   .hostConnectionCoresize(4)
+                                   .codec(Redis())
+                                   .build())
 
-val redisBuilder = Store.Builder(
-    redis.StorageBuilder("0.0.0.0", 6379),
-    redis.IndexBuilder("0.0.0.0", 6379)
-)
+val storeBuilder = Store.Builder(redis.SpanStoreBuilder(client))
 
 CollectorServiceBuilder(Scribe.Interface(categories = Set("zipkin")))
-  .writeTo(redisBuilder)
+  .writeTo(storeBuilder)
