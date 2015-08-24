@@ -123,12 +123,16 @@ class Handlers(jsonGenerator: ZipkinJson, mustacheGenerator: ZipkinMustache, que
       }
   }
 
-  val addLayout: Filter[Request, Renderer, Request, Renderer] =
+  def addLayout(pageTitle: String, environment: String): Filter[Request, Renderer, Request, Renderer] =
     Filter.mk[Request, Renderer, Request, Renderer] { (req, svc) =>
       svc(req) map { renderer =>
         response: Response => {
           renderer(response)
-          val r = MustacheRenderer("v2/layout.mustache", Map("body" -> response.contentString))
+          val data = Map[String, Object](
+            ("pageTitle" -> pageTitle),
+            ("environment" -> environment),
+            ("body" -> response.contentString))
+          val r = MustacheRenderer("v2/layout.mustache", data)
           r(response)
         }
       }
@@ -260,7 +264,6 @@ class Handlers(jsonGenerator: ZipkinJson, mustacheGenerator: ZipkinMustache, que
         val spanList = spans map { span => Map("name" -> span, "selected" -> (if (Some(span) == spanName) "selected" else "")) }
 
         var data = Map[String, Object](
-          ("pageTitle" -> "Index"),
           ("timestamp" -> queryExtractor.getTimestampStr(req)),
           ("annotationQuery" -> req.params.get("annotationQuery").getOrElse("")),
           ("services" -> svcList),

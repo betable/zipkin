@@ -13,19 +13,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import com.datastax.driver.core.Cluster
-import com.datastax.driver.core.SocketOptions
+import com.twitter.app.App
 import com.twitter.zipkin.builder.QueryServiceBuilder
 import com.twitter.zipkin.cassandra
+import com.twitter.zipkin.cassandra.CassandraSpanStoreFactory
 import com.twitter.zipkin.storage.Store
-import org.twitter.zipkin.storage.cassandra.ZipkinRetryPolicy
 
-val cluster = Cluster.builder()
-  .addContactPoint("localhost")
-  .withSocketOptions(new SocketOptions().setConnectTimeoutMillis(10000).setReadTimeoutMillis(20000))
-  .withRetryPolicy(ZipkinRetryPolicy.INSTANCE)
-  .build()
+object Factory extends App with CassandraSpanStoreFactory
 
+Factory.cassandraDest.parse(sys.env.get("CASSANDRA_CONTACT_POINTS").getOrElse("localhost"))
+
+val username = sys.env.get("CASSANDRA_USERNAME")
+val password = sys.env.get("CASSANDRA_PASSWORD")
+
+if (username.isDefined && password.isDefined) {
+  Factory.cassandraUsername.parse(username.get)
+  Factory.cassandraPassword.parse(password.get)
+}
+
+val cluster = Factory.createClusterBuilder().build()
 val storeBuilder = Store.Builder(new cassandra.SpanStoreBuilder(cluster))
 
 QueryServiceBuilder(storeBuilder)

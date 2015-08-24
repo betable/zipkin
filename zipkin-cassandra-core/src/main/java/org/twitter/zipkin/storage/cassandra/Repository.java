@@ -4,6 +4,7 @@ package org.twitter.zipkin.storage.cassandra;
 import com.datastax.driver.core.BatchStatement;
 import com.datastax.driver.core.BoundStatement;
 import com.datastax.driver.core.Cluster;
+import com.datastax.driver.core.KeyspaceMetadata;
 import com.datastax.driver.core.PreparedStatement;
 import com.datastax.driver.core.ResultSetFuture;
 import com.datastax.driver.core.Row;
@@ -22,25 +23,28 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 public final class Repository implements AutoCloseable {
 
-    static final String KEYSPACE = "zipkin";
-
-    private static final String KEY_MARKER = "k";
-    private static final String COLUMN_MARKER = "c";
-    private static final String VALUE_MARKER = "v";
-    private static final String TTL_MARKER = "t";
-    private static final String LIMIT_MARKER = "l";
+    public static final String KEYSPACE = "zipkin";
+    public static final short BUCKETS = 10;
 
     private static final Logger LOG = LoggerFactory.getLogger(Repository.class);
+    private static final Random RAND = new Random();
+    private static final List<Integer> ALL_BUCKETS = Collections.unmodifiableList(new ArrayList<Integer>() {{
+        for (int i = 0 ; i < BUCKETS ; ++i) {
+            add(i);
+        }
+    }});
 
     private final Session session;
     private final PreparedStatement selectTraces;
@@ -64,196 +68,198 @@ public final class Repository implements AutoCloseable {
     private final PreparedStatement insertTraceDurations;
     private final PreparedStatement selectTraceDurationHead;
     private final PreparedStatement selectTraceDurationTail;
+    private final Map<String,String> metadata;
 
 
     public Repository(String keyspace, Cluster cluster) {
-        Schema.ensureExists(keyspace, cluster);
+        metadata = Schema.ensureExists(keyspace, cluster);
         session = cluster.connect(keyspace);
 
-        // @fixme use cassandraSpanStore.cfs.traces (from ZipkinColumnFamilyNames)
-        //        or "traces" is replaced with a prepared statement being passed in
         insertSpan = session.prepare(
                 QueryBuilder
                     .insertInto("traces")
-                    .value("key", QueryBuilder.bindMarker(KEY_MARKER))
-                    .value("column1", QueryBuilder.bindMarker(COLUMN_MARKER))
-                    .value("value", QueryBuilder.bindMarker(VALUE_MARKER))
-                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker(TTL_MARKER))));
+                    .value("trace_id", QueryBuilder.bindMarker("trace_id"))
+                    .value("ts", QueryBuilder.bindMarker("ts"))
+                    .value("span_name", QueryBuilder.bindMarker("span_name"))
+                    .value("span", QueryBuilder.bindMarker("span"))
+                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker("ttl_"))));
 
         selectTraces = session.prepare(
-                QueryBuilder.select("key", "value")
+                QueryBuilder.select("trace_id", "span")
                     .from("traces")
-                    .where(QueryBuilder.in("key", QueryBuilder.bindMarker(KEY_MARKER)))
-                    .limit(QueryBuilder.bindMarker(LIMIT_MARKER)));
+                    .where(QueryBuilder.in("trace_id", QueryBuilder.bindMarker("trace_id")))
+                    .limit(QueryBuilder.bindMarker("limit_")));
 
         selectTraceTtl = session.prepare(
                 QueryBuilder.select()
-                    .ttl("value")
+                    .ttl("span")
                     .from("traces")
-                    .where(QueryBuilder.eq("key", QueryBuilder.bindMarker(KEY_MARKER))));
+                    .where(QueryBuilder.eq("trace_id", QueryBuilder.bindMarker("trace_id"))));
 
         selectTopAnnotations = session.prepare(
-                QueryBuilder.select("value")
+                QueryBuilder.select("annotation")
                     .from("top_annotations")
-                    .where(QueryBuilder.in("key", QueryBuilder.bindMarker(KEY_MARKER))));
+                    .where(QueryBuilder.in("key", QueryBuilder.bindMarker("key_"))));
 
         deleteTopAnnotations = session.prepare(
                 QueryBuilder
                     .delete()
                     .from("top_annotations")
-                    .where(QueryBuilder.eq("key", QueryBuilder.bindMarker(KEY_MARKER))));
+                    .where(QueryBuilder.eq("key", QueryBuilder.bindMarker("key_"))));
 
         insertTopAnnotations = session.prepare(
                 QueryBuilder
                     .insertInto("top_annotations")
-                    .value("key", QueryBuilder.bindMarker(KEY_MARKER))
-                    .value("column1", QueryBuilder.bindMarker(COLUMN_MARKER))
-                    .value("value", QueryBuilder.bindMarker(VALUE_MARKER)));
+                    .value("key", QueryBuilder.bindMarker("key_"))
+                    .value("idx", QueryBuilder.bindMarker("idx"))
+                    .value("annotation", QueryBuilder.bindMarker("annotation")));
 
         selectDependencies = session.prepare(
-                QueryBuilder.select("value")
+                QueryBuilder.select("dependencies")
                     .from("dependencies")
-                    .where(QueryBuilder.in("key", QueryBuilder.bindMarker(KEY_MARKER))));
+                    .where(QueryBuilder.in("day", QueryBuilder.bindMarker("day"))));
 
         insertDependencies = session.prepare(
                 QueryBuilder
                     .insertInto("dependencies")
-                    .value("key", QueryBuilder.bindMarker(KEY_MARKER))
-                    .value("column1", QueryBuilder.bindMarker(COLUMN_MARKER))
-                    .value("value", QueryBuilder.bindMarker(VALUE_MARKER)));
+                    .value("day", QueryBuilder.bindMarker("day"))
+                    .value("dependencies", QueryBuilder.bindMarker("dependencies")));
 
         selectServiceNames = session.prepare(
-                QueryBuilder.select("column1")
+                QueryBuilder.select("service_name")
                     .from("service_names"));
 
         insertServiceName = session.prepare(
                 QueryBuilder
                     .insertInto("service_names")
-                    .value("key", QueryBuilder.bindMarker(KEY_MARKER))
-                    .value("column1", QueryBuilder.bindMarker(COLUMN_MARKER))
-                    .value("value", QueryBuilder.bindMarker(VALUE_MARKER))
-                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker(TTL_MARKER))));
+                    .value("service_name", QueryBuilder.bindMarker("service_name"))
+                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker("ttl_"))));
 
         selectSpanNames = session.prepare(
-                QueryBuilder.select("column1")
+                QueryBuilder.select("span_name")
                     .from("span_names")
-                    .where(QueryBuilder.eq("key", QueryBuilder.bindMarker(KEY_MARKER))));
+                    .where(QueryBuilder.eq("service_name", QueryBuilder.bindMarker("service_name")))
+                    .and(QueryBuilder.in("bucket", QueryBuilder.bindMarker("bucket"))));
 
         insertSpanName = session.prepare(
                 QueryBuilder
                     .insertInto("span_names")
-                    .value("key", QueryBuilder.bindMarker(KEY_MARKER))
-                    .value("column1", QueryBuilder.bindMarker(COLUMN_MARKER))
-                    .value("value", QueryBuilder.bindMarker(VALUE_MARKER))
-                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker(TTL_MARKER))));
+                    .value("service_name", QueryBuilder.bindMarker("service_name"))
+                    .value("bucket", QueryBuilder.bindMarker("bucket"))
+                    .value("span_name", QueryBuilder.bindMarker("span_name"))
+                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker("ttl_"))));
 
         selectTraceIdsByServiceName = session.prepare(
-                QueryBuilder.select("column1", "value")
+                QueryBuilder.select("ts", "trace_id")
                     .from("service_name_index")
-                    .where(QueryBuilder.eq("key", QueryBuilder.bindMarker(KEY_MARKER)))
-                    .and(QueryBuilder.lte("column1", QueryBuilder.bindMarker(COLUMN_MARKER)))
-                    .limit(QueryBuilder.bindMarker(LIMIT_MARKER))
-                     // @todo use CLUSTERING ORDER instead
-                    .orderBy(QueryBuilder.desc("column1")));
+                    .where(QueryBuilder.eq("service_name", QueryBuilder.bindMarker("service_name")))
+                    .and(QueryBuilder.in("bucket", QueryBuilder.bindMarker("bucket")))
+                    .and(QueryBuilder.lte("ts", QueryBuilder.bindMarker("ts")))
+                    .limit(QueryBuilder.bindMarker("limit_"))
+                    .orderBy(QueryBuilder.desc("ts")));
 
         insertTraceIdByServiceName = session.prepare(
                 QueryBuilder
                     .insertInto("service_name_index")
-                    .value("key", QueryBuilder.bindMarker(KEY_MARKER))
-                    .value("column1", QueryBuilder.bindMarker(COLUMN_MARKER))
-                    .value("value", QueryBuilder.bindMarker(VALUE_MARKER))
-                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker(TTL_MARKER))));
+                    .value("service_name", QueryBuilder.bindMarker("service_name"))
+                    .value("bucket", QueryBuilder.bindMarker("bucket"))
+                    .value("ts", QueryBuilder.bindMarker("ts"))
+                    .value("trace_id", QueryBuilder.bindMarker("trace_id"))
+                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker("ttl_"))));
 
         selectTraceIdsBySpanName = session.prepare(
-                QueryBuilder.select("column1", "value")
+                QueryBuilder.select("ts", "trace_id")
                     .from("service_span_name_index")
-                    .where(QueryBuilder.eq("key", QueryBuilder.bindMarker(KEY_MARKER)))
-                    .and(QueryBuilder.lte("column1", QueryBuilder.bindMarker(COLUMN_MARKER)))
-                    .limit(QueryBuilder.bindMarker(LIMIT_MARKER))
-                     // @todo use CLUSTERING ORDER instead
-                    .orderBy(QueryBuilder.desc("column1")));
+                    .where(QueryBuilder.eq("service_span_name", QueryBuilder.bindMarker("service_span_name")))
+                    .and(QueryBuilder.lte("ts", QueryBuilder.bindMarker("ts")))
+                    .limit(QueryBuilder.bindMarker("limit_"))
+                    .orderBy(QueryBuilder.desc("ts")));
 
         insertTraceIdBySpanName = session.prepare(
                 QueryBuilder
                     .insertInto("service_span_name_index")
-                    .value("key", QueryBuilder.bindMarker(KEY_MARKER))
-                    .value("column1", QueryBuilder.bindMarker(COLUMN_MARKER))
-                    .value("value", QueryBuilder.bindMarker(VALUE_MARKER))
-                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker(TTL_MARKER))));
+                    .value("service_span_name", QueryBuilder.bindMarker("service_span_name"))
+                    .value("ts", QueryBuilder.bindMarker("ts"))
+                    .value("trace_id", QueryBuilder.bindMarker("trace_id"))
+                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker("ttl_"))));
 
         selectTraceIdsByAnnotations = session.prepare(
-                QueryBuilder.select("column1", "value")
+                QueryBuilder.select("ts", "trace_id")
                     .from("annotations_index")
-                    .where(QueryBuilder.eq("key", QueryBuilder.bindMarker(KEY_MARKER)))
-                    .and(QueryBuilder.lte("column1", QueryBuilder.bindMarker(COLUMN_MARKER)))
-                    .limit(QueryBuilder.bindMarker(LIMIT_MARKER))
-                     // @todo use CLUSTERING ORDER instead
-                    .orderBy(QueryBuilder.desc("column1")));
+                    .where(QueryBuilder.eq("annotation", QueryBuilder.bindMarker("annotation")))
+                    .and(QueryBuilder.in("bucket", QueryBuilder.bindMarker("bucket")))
+                    .and(QueryBuilder.lte("ts", QueryBuilder.bindMarker("ts")))
+                    .limit(QueryBuilder.bindMarker("limit_"))
+                    .orderBy(QueryBuilder.desc("ts")));
 
         insertTraceIdByAnnotation = session.prepare(
                 QueryBuilder
                     .insertInto("annotations_index")
-                    .value("key", QueryBuilder.bindMarker(KEY_MARKER))
-                    .value("column1", QueryBuilder.bindMarker(COLUMN_MARKER))
-                    .value("value", QueryBuilder.bindMarker(VALUE_MARKER))
-                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker(TTL_MARKER))));
+                    .value("annotation", QueryBuilder.bindMarker("annotation"))
+                    .value("bucket", QueryBuilder.bindMarker("bucket"))
+                    .value("ts", QueryBuilder.bindMarker("ts"))
+                    .value("trace_id", QueryBuilder.bindMarker("trace_id"))
+                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker("ttl_"))));
 
         selectTraceDurationHead = session.prepare(
-                QueryBuilder.select("key", "column1")
+                QueryBuilder.select("trace_id", "ts")
                     .from("duration_index")
-                    .where(QueryBuilder.eq("key", QueryBuilder.bindMarker(KEY_MARKER)))
+                    .where(QueryBuilder.eq("trace_id", QueryBuilder.bindMarker("trace_id")))
                     .limit(1)
-                    .orderBy(QueryBuilder.asc("column1")));
+                    .orderBy(QueryBuilder.asc("ts")));
 
         selectTraceDurationTail = session.prepare(
-                QueryBuilder.select("key", "column1")
+                QueryBuilder.select("trace_id", "ts")
                     .from("duration_index")
-                    .where(QueryBuilder.eq("key", QueryBuilder.bindMarker(KEY_MARKER)))
+                    .where(QueryBuilder.eq("trace_id", QueryBuilder.bindMarker("trace_id")))
                     .limit(1)
-                    .orderBy(QueryBuilder.desc("column1")));
+                    .orderBy(QueryBuilder.desc("ts")));
 
         insertTraceDurations = session.prepare(
                 QueryBuilder
                     .insertInto("duration_index")
-                    .value("key", QueryBuilder.bindMarker(KEY_MARKER))
-                    .value("column1", QueryBuilder.bindMarker(COLUMN_MARKER))
-                    .value("value", QueryBuilder.bindMarker(VALUE_MARKER))
-                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker(TTL_MARKER))));
+                    .value("trace_id", QueryBuilder.bindMarker("trace_id"))
+                    .value("ts", QueryBuilder.bindMarker("ts"))
+                    .using(QueryBuilder.ttl(QueryBuilder.bindMarker("ttl_"))));
     }
 
     /**
      * Store the span in the underlying storage for later retrieval.
-     * @return a future for the operation
      */
-    public void storeSpan(long traceId, String spanName, ByteBuffer span, int ttl) {
+    public void storeSpan(long traceId, long timestamp, String spanName, ByteBuffer span, int ttl) {
         Preconditions.checkNotNull(spanName);
         Preconditions.checkArgument(!spanName.isEmpty());
+        if (0 == timestamp && metadata.get("traces.compaction.class").contains("DateTieredCompactionStrategy")) {
+            LOG.warn("span with no first or last timestamp. "
+                    + "if this happens a lot consider switching back to SizeTieredCompactionStrategy for "
+                    + KEYSPACE + ".traces");
+        }
         try {
-            ByteBuffer key = ByteBuffer.allocate(8).putLong(traceId);
-            key.rewind();
 
             BoundStatement bound = insertSpan.bind()
-                    .setBytes(KEY_MARKER, key)
-                    .setBytes(COLUMN_MARKER, ByteBuffer.wrap(spanName.getBytes()))
-                    .setBytes(VALUE_MARKER, span)
-                    .setInt(TTL_MARKER, ttl);
+                    .setLong("trace_id", traceId)
+                    .setDate("ts", new Date(timestamp))
+                    .setString("span_name", spanName)
+                    .setBytes("span", span)
+                    .setInt("ttl_", ttl);
 
             if (LOG.isDebugEnabled()) {
-                LOG.debug(debugInsertSpan(traceId, spanName, span, ttl));
+                LOG.debug(debugInsertSpan(traceId, timestamp, spanName, span, ttl));
             }
             session.executeAsync(bound);
         } catch (RuntimeException ex) {
-            LOG.error("failed " + debugInsertSpan(traceId, spanName, span, ttl), ex);
+            LOG.error("failed " + debugInsertSpan(traceId, timestamp, spanName, span, ttl), ex);
             throw ex;
         }
     }
 
-    private String debugInsertSpan(long traceId, String spanName, ByteBuffer span, int ttl) {
+    private String debugInsertSpan(long traceId, long timestamp, String spanName, ByteBuffer span, int ttl) {
         return insertSpan.getQueryString()
-                .replace(':' + KEY_MARKER, String.valueOf(traceId))
-                .replace(':' + COLUMN_MARKER, spanName)
-                .replace(':' + VALUE_MARKER, Bytes.toHexString(span))
-                .replace(':' + TTL_MARKER, String.valueOf(ttl));
+                .replace(":trace_id", String.valueOf(traceId))
+                .replace(":ts", String.valueOf(timestamp))
+                .replace(":span_name", spanName)
+                .replace(":span", Bytes.toHexString(span))
+                .replace(":ttl_", String.valueOf(ttl));
     }
 
     public Set<Long> tracesExist(Long[] traceIds) {
@@ -272,26 +278,24 @@ public final class Repository implements AutoCloseable {
      */
     public Map<Long,List<ByteBuffer>> getSpansByTraceIds(Long[] traceIds, int limit) {
         Preconditions.checkNotNull(traceIds);
-        Preconditions.checkArgument(0 < traceIds.length);
         try {
-            List<ByteBuffer> keys = new ArrayList<>();
-            for (Long traceId : traceIds) {
-                assert null != traceId;
-                ByteBuffer key = ByteBuffer.allocate(8).putLong(traceId);
-                key.rewind();
-                keys.add(key);
-            }
-            BoundStatement bound = selectTraces.bind().setList(KEY_MARKER, keys).setInt(LIMIT_MARKER, limit);
-            if (LOG.isDebugEnabled()) {
-                LOG.debug(debugSelectTraces(traceIds, limit));
-            }
             Map<Long,List<ByteBuffer>> spans = new HashMap<>();
-            for (Row row : session.execute(bound).all()) {
-                long traceId = row.getBytes("key").getLong();
-                if (!spans.containsKey(traceId)) {
-                    spans.put(traceId, new ArrayList<ByteBuffer>());
+            if (0 < traceIds.length) {
+
+                BoundStatement bound = selectTraces.bind()
+                        .setList("trace_id", Arrays.asList(traceIds))
+                        .setInt("limit_", limit);
+
+                if (LOG.isDebugEnabled()) {
+                    LOG.debug(debugSelectTraces(traceIds, limit));
                 }
-                spans.get(traceId).add(row.getBytes("value"));
+                for (Row row : session.execute(bound).all()) {
+                    long traceId = row.getLong("trace_id");
+                    if (!spans.containsKey(traceId)) {
+                        spans.put(traceId, new ArrayList<ByteBuffer>());
+                    }
+                    spans.get(traceId).add(row.getBytes("span"));
+                }
             }
             return spans;
         } catch (RuntimeException ex) {
@@ -302,15 +306,13 @@ public final class Repository implements AutoCloseable {
 
     private String debugSelectTraces(Long[] traceIds, int limit) {
         return selectTraces.getQueryString()
-                        .replace(':' + KEY_MARKER, Arrays.toString(traceIds))
-                        .replace(':' + LIMIT_MARKER, String.valueOf(limit));
+                        .replace(":trace_id", Arrays.toString(traceIds))
+                        .replace(":limit_", String.valueOf(limit));
     }
 
     public long getSpanTtlSeconds(long traceId) {
         try {
-            ByteBuffer key = ByteBuffer.allocate(8).putLong(traceId);
-            key.rewind();
-            BoundStatement bound = selectTraceTtl.bind().setBytes(KEY_MARKER, key);
+            BoundStatement bound = selectTraceTtl.bind().setLong("trace_id", traceId);
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugSelectTraceTtl(traceId));
             }
@@ -326,20 +328,20 @@ public final class Repository implements AutoCloseable {
     }
 
     private String debugSelectTraceTtl(long traceId) {
-        return selectTraceTtl.getQueryString().replace(':' + KEY_MARKER, String.valueOf(traceId));
+        return selectTraceTtl.getQueryString().replace(":trace_id", String.valueOf(traceId));
     }
 
     public List<String> getTopAnnotations(String key) {
         Preconditions.checkNotNull(key);
         Preconditions.checkArgument(!key.isEmpty());
         try {
-            BoundStatement bound = selectTopAnnotations.bind().setBytes(KEY_MARKER, ByteBuffer.wrap(key.getBytes()));
+            BoundStatement bound = selectTopAnnotations.bind().setString("key_", key);
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugSelectTopAnnotations(key));
             }
             List<String> annotations = new ArrayList<>();
             for (Row row : session.execute(bound).all()) {
-                annotations.add(new String(Bytes.getArray(row.getBytes("value"))));
+                annotations.add(row.getString("annotation"));
             }
             return annotations;
         } catch (RuntimeException ex) {
@@ -349,7 +351,7 @@ public final class Repository implements AutoCloseable {
     }
 
     private String debugSelectTopAnnotations(String key) {
-        return selectTopAnnotations.getQueryString().replace(':' + KEY_MARKER, key);
+        return selectTopAnnotations.getQueryString().replace(":key_", key);
     }
 
     public void storeTopAnnotations(String key, List<String> annotations) {
@@ -358,7 +360,7 @@ public final class Repository implements AutoCloseable {
         Preconditions.checkNotNull(annotations);
         Preconditions.checkArgument(!annotations.isEmpty());
         try {
-            BoundStatement bound = deleteTopAnnotations.bind().setBytes(KEY_MARKER, ByteBuffer.wrap(key.getBytes()));
+            BoundStatement bound = deleteTopAnnotations.bind().setString("key_", key);
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugDeleteTopAnnotations(key));
             }
@@ -373,9 +375,9 @@ public final class Repository implements AutoCloseable {
             for (String annotation : annotations) {
 
                 BoundStatement bound = insertTopAnnotations.bind()
-                        .setBytes(KEY_MARKER, ByteBuffer.wrap(key.getBytes()))
-                        .setLong(COLUMN_MARKER, annotations.indexOf(annotation))
-                        .setBytes(VALUE_MARKER, ByteBuffer.wrap(annotation.getBytes()));
+                        .setString("key_", key)
+                        .setInt("idx", annotations.indexOf(annotation))
+                        .setString("annotation", annotation);
 
                 String debug = debugInsertTopAnnotations(key, annotation, annotations.indexOf(annotation));
                 debugs.append(debug).append(';');
@@ -390,25 +392,22 @@ public final class Repository implements AutoCloseable {
     }
 
     private String debugDeleteTopAnnotations(String key) {
-        return deleteTopAnnotations.getQueryString().replace(':' + KEY_MARKER, key);
+        return deleteTopAnnotations.getQueryString().replace(":key_", key);
     }
 
     private String debugInsertTopAnnotations(String key, String annotation, int idx) {
         return insertTopAnnotations.getQueryString()
-                            .replace(':' + KEY_MARKER, key)
-                            .replace(':' + COLUMN_MARKER, String.valueOf(idx))
-                            .replace(':' + VALUE_MARKER, annotation);
+                            .replace(":key_", key)
+                            .replace(":idx", String.valueOf(idx))
+                            .replace(":annotation", annotation);
     }
 
     public void storeDependencies(long startFlooredToDay, ByteBuffer dependencies) {
         try {
-            ByteBuffer key = ByteBuffer.allocate(8).putLong(startFlooredToDay);
-            key.rewind();
 
             BoundStatement bound = insertDependencies.bind()
-                    .setBytes(KEY_MARKER, key)
-                    .setLong(COLUMN_MARKER, 0)
-                    .setBytes(VALUE_MARKER, dependencies);
+                    .setDate("day", new Date(startFlooredToDay))
+                    .setBytes("dependencies", dependencies);
 
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugInsertDependencies(startFlooredToDay, dependencies));
@@ -422,27 +421,20 @@ public final class Repository implements AutoCloseable {
 
     private String debugInsertDependencies(long startFlooredToDay, ByteBuffer dependencies) {
         return insertDependencies.getQueryString()
-                        .replace(':' + KEY_MARKER, String.valueOf(startFlooredToDay))
-                        .replace(':' + COLUMN_MARKER, String.valueOf(0))
-                        .replace(':' + VALUE_MARKER, Bytes.toHexString(dependencies));
+                        .replace(":day", new Date(startFlooredToDay).toString())
+                        .replace(":dependencies", Bytes.toHexString(dependencies));
     }
 
     public List<ByteBuffer> getDependencies(long startDate, long endDate) {
         List<Date> days = getDays(endDate, endDate);
         try {
-            List<ByteBuffer> keys = new ArrayList<>();
-            for (Date day : days) {
-                ByteBuffer key = ByteBuffer.allocate(8).putLong(day.getTime());
-                key.rewind();
-                keys.add(key);
-            }
-            BoundStatement bound = selectDependencies.bind().setList(KEY_MARKER, keys);
+            BoundStatement bound = selectDependencies.bind().setList("day", days);
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugSelectDependencies(days));
             }
             List<ByteBuffer> dependencies = new ArrayList<>();
             for (Row row : session.execute(bound).all()) {
-                dependencies.add(row.getBytes("value"));
+                dependencies.add(row.getBytes("dependencies"));
             }
             return dependencies;
         } catch (RuntimeException ex) {
@@ -452,7 +444,7 @@ public final class Repository implements AutoCloseable {
     }
 
     private String debugSelectDependencies(List<Date> days) {
-        return selectDependencies.getQueryString().replace(':' + KEY_MARKER, Arrays.toString(days.toArray()));
+        return selectDependencies.getQueryString().replace(":day", Arrays.toString(days.toArray()));
     }
 
     public Set<String> getServiceNames() {
@@ -463,7 +455,7 @@ public final class Repository implements AutoCloseable {
                 LOG.debug(selectServiceNames.getQueryString());
             }
             for (Row row : session.execute(bound).all()) {
-                serviceNames.add(new String(Bytes.getArray(row.getBytes("column1"))));
+                serviceNames.add(row.getString("service_name"));
             }
             return serviceNames;
         } catch (RuntimeException ex) {
@@ -477,10 +469,8 @@ public final class Repository implements AutoCloseable {
         Preconditions.checkArgument(!serviceName.isEmpty());
         try {
             BoundStatement bound = insertServiceName.bind()
-                    .setBytes(KEY_MARKER, ByteBuffer.wrap("servicenames".getBytes()))
-                    .setBytes(COLUMN_MARKER, ByteBuffer.wrap(serviceName.getBytes()))
-                    .setBytes(VALUE_MARKER, ByteBuffer.wrap("".getBytes()))
-                    .setInt(TTL_MARKER, ttl);
+                    .setString("service_name", serviceName)
+                    .setInt("ttl_", ttl);
 
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugInsertServiceName(serviceName, ttl));
@@ -494,10 +484,8 @@ public final class Repository implements AutoCloseable {
 
     private String debugInsertServiceName(String serviceName, int ttl) {
         return insertServiceName.getQueryString()
-                .replace(':' + KEY_MARKER, "servicenames")
-                .replace(':' + COLUMN_MARKER, serviceName)
-                .replace(':' + VALUE_MARKER, "")
-                .replace(':' + TTL_MARKER, String.valueOf(ttl));
+                .replace(":service_name", serviceName)
+                .replace(":ttl_", String.valueOf(ttl));
     }
 
     public Set<String> getSpanNames(String serviceName) {
@@ -505,12 +493,16 @@ public final class Repository implements AutoCloseable {
         try {
             Set<String> spanNames = new HashSet<>();
             if (!serviceName.isEmpty()) {
-                BoundStatement bound = selectSpanNames.bind().setBytes(KEY_MARKER, ByteBuffer.wrap(serviceName.getBytes()));
+
+                BoundStatement bound = selectSpanNames.bind()
+                        .setString("service_name", serviceName)
+                        .setList("bucket", ALL_BUCKETS);
+
                 if (LOG.isDebugEnabled()) {
                     LOG.debug(debugSelectSpanNames(serviceName));
                 }
                 for (Row row : session.execute(bound).all()) {
-                    spanNames.add(new String(Bytes.getArray(row.getBytes("column1"))));
+                    spanNames.add(row.getString("span_name"));
                 }
             }
             return spanNames;
@@ -521,7 +513,7 @@ public final class Repository implements AutoCloseable {
     }
 
     private String debugSelectSpanNames(String serviceName) {
-        return selectSpanNames.getQueryString().replace(':' + KEY_MARKER, serviceName);
+        return selectSpanNames.getQueryString().replace(':' + "service_name", serviceName);
     }
 
     public void storeSpanName(String serviceName, String spanName, int ttl) {
@@ -531,10 +523,10 @@ public final class Repository implements AutoCloseable {
         Preconditions.checkArgument(!spanName.isEmpty());
         try {
             BoundStatement bound = insertSpanName.bind()
-                    .setBytes(KEY_MARKER, ByteBuffer.wrap(serviceName.getBytes()))
-                    .setBytes(COLUMN_MARKER, ByteBuffer.wrap(spanName.getBytes()))
-                    .setBytes(VALUE_MARKER, ByteBuffer.wrap("".getBytes()))
-                    .setInt(TTL_MARKER, ttl);
+                    .setString("service_name", serviceName)
+                    .setInt("bucket", RAND.nextInt(BUCKETS))
+                    .setString("span_name", spanName)
+                    .setInt("ttl_", ttl);
 
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugInsertSpanName(serviceName, spanName, ttl));
@@ -548,10 +540,9 @@ public final class Repository implements AutoCloseable {
 
     private String debugInsertSpanName(String serviceName, String spanName, int ttl) {
         return insertSpanName.getQueryString()
-                .replace(':' + KEY_MARKER, serviceName)
-                .replace(':' + COLUMN_MARKER, spanName)
-                .replace(':' + VALUE_MARKER, "")
-                .replace(':' + TTL_MARKER, String.valueOf(ttl));
+                .replace(":service_name", serviceName)
+                .replace(":span_name", spanName)
+                .replace(":ttl_", String.valueOf(ttl));
     }
 
     public Map<Long,Long> getTraceIdsByServiceName(String serviceName, long to, int limit) {
@@ -559,16 +550,17 @@ public final class Repository implements AutoCloseable {
         Preconditions.checkArgument(!serviceName.isEmpty());
         try {
             BoundStatement bound = selectTraceIdsByServiceName.bind()
-                    .setBytes(KEY_MARKER, ByteBuffer.wrap(serviceName.getBytes()))
-                    .setLong(COLUMN_MARKER, to)
-                    .setInt(LIMIT_MARKER, limit);
+                    .setString("service_name", serviceName)
+                    .setList("bucket", ALL_BUCKETS)
+                    .setDate("ts", new Date(to))
+                    .setInt("limit_", limit);
 
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugSelectTraceIdsByServiceName(serviceName, to, limit));
             }
             Map<Long,Long> traceIdsToTimestamps = new HashMap<>();
             for (Row row : session.execute(bound).all()) {
-                traceIdsToTimestamps.put(row.getBytes("value").getLong(), row.getLong("column1"));
+                traceIdsToTimestamps.put(row.getLong("trace_id"), row.getDate("ts").getTime());
             }
             return traceIdsToTimestamps;
         } catch (RuntimeException ex) {
@@ -579,23 +571,22 @@ public final class Repository implements AutoCloseable {
 
     private String debugSelectTraceIdsByServiceName(String serviceName, long to, int limit) {
         return selectTraceIdsByServiceName.getQueryString()
-                .replace(':' + KEY_MARKER, serviceName)
-                .replace(':' + COLUMN_MARKER, String.valueOf(to))
-                .replace(':' + LIMIT_MARKER, String.valueOf(limit));
+                .replace(":service_name", serviceName)
+                .replace(":ts", new Date(to).toString())
+                .replace(":limit_", String.valueOf(limit));
     }
 
     public void storeTraceIdByServiceName(String serviceName, long timestamp, long traceId, int ttl) {
         Preconditions.checkNotNull(serviceName);
         Preconditions.checkArgument(!serviceName.isEmpty());
         try {
-            ByteBuffer traceIdBytes = ByteBuffer.allocate(8).putLong(traceId);
-            traceIdBytes.rewind();
 
             BoundStatement bound = insertTraceIdByServiceName.bind()
-                    .setBytes(KEY_MARKER, ByteBuffer.wrap(serviceName.getBytes()))
-                    .setLong(COLUMN_MARKER, timestamp)
-                    .setBytes(VALUE_MARKER, traceIdBytes)
-                    .setInt(TTL_MARKER, ttl);
+                    .setString("service_name", serviceName)
+                    .setInt("bucket", RAND.nextInt(BUCKETS))
+                    .setDate("ts", new Date(timestamp))
+                    .setLong("trace_id", traceId)
+                    .setInt("ttl_", ttl);
 
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugInsertTraceIdByServiceName(serviceName, timestamp, traceId, ttl));
@@ -609,10 +600,10 @@ public final class Repository implements AutoCloseable {
 
     private String debugInsertTraceIdByServiceName(String serviceName, long timestamp, long traceId, int ttl) {
         return insertTraceIdByServiceName.getQueryString()
-                        .replace(':' + KEY_MARKER, serviceName)
-                        .replace(':' + COLUMN_MARKER, String.valueOf(timestamp))
-                        .replace(':' + VALUE_MARKER, String.valueOf(traceId))
-                        .replace(':' + TTL_MARKER, String.valueOf(ttl));
+                        .replace(":service_name", serviceName)
+                        .replace(":ts", new Date(timestamp).toString())
+                        .replace(":trace_id", new Date(traceId).toString())
+                        .replace(":ttl_", String.valueOf(ttl));
     }
 
     public Map<Long,Long> getTraceIdsBySpanName(String serviceName, String spanName, long to, int limit) {
@@ -623,16 +614,16 @@ public final class Repository implements AutoCloseable {
         String serviceSpanName = serviceName + "." + spanName;
         try {
             BoundStatement bound = selectTraceIdsBySpanName.bind()
-                    .setBytes(KEY_MARKER, ByteBuffer.wrap(serviceSpanName.getBytes()))
-                    .setLong(COLUMN_MARKER, to)
-                    .setInt(LIMIT_MARKER, limit);
+                    .setString("service_span_name", serviceSpanName)
+                    .setDate("ts", new Date(to))
+                    .setInt("limit_", limit);
 
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugSelectTraceIdsBySpanName(serviceSpanName, to, limit));
             }
             Map<Long,Long> traceIdsToTimestamps = new HashMap<>();
             for (Row row : session.execute(bound).all()) {
-                traceIdsToTimestamps.put(row.getBytes("value").getLong(), row.getLong("column1"));
+                traceIdsToTimestamps.put(row.getLong("trace_id"), row.getDate("ts").getTime());
             }
             return traceIdsToTimestamps;
         } catch (RuntimeException ex) {
@@ -643,9 +634,9 @@ public final class Repository implements AutoCloseable {
 
     private String debugSelectTraceIdsBySpanName(String serviceSpanName, long to, int limit) {
         return selectTraceIdsByServiceName.getQueryString()
-                .replace(':' + KEY_MARKER, serviceSpanName)
-                .replace(':' + COLUMN_MARKER, String.valueOf(to))
-                .replace(':' + LIMIT_MARKER, String.valueOf(limit));
+                .replace(":service_span_name", serviceSpanName)
+                .replace(":ts", new Date(to).toString())
+                .replace(":limit_", String.valueOf(limit));
     }
 
     public void storeTraceIdBySpanName(String serviceName, String spanName, long timestamp, long traceId, int ttl) {
@@ -655,14 +646,12 @@ public final class Repository implements AutoCloseable {
         Preconditions.checkArgument(!spanName.isEmpty());
         try {
             String serviceSpanName = serviceName + "." + spanName;
-            ByteBuffer traceIdBytes = ByteBuffer.allocate(8).putLong(traceId);
-            traceIdBytes.rewind();
 
             BoundStatement bound = insertTraceIdBySpanName.bind()
-                    .setBytes(KEY_MARKER, ByteBuffer.wrap(serviceSpanName.getBytes()))
-                    .setLong(COLUMN_MARKER, timestamp)
-                    .setBytes(VALUE_MARKER, traceIdBytes)
-                    .setInt(TTL_MARKER, ttl);
+                    .setString("service_span_name", serviceSpanName)
+                    .setDate("ts", new Date(timestamp))
+                    .setLong("trace_id", traceId)
+                    .setInt("ttl_", ttl);
 
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugInsertTraceIdBySpanName(serviceSpanName, timestamp, traceId, ttl));
@@ -676,25 +665,26 @@ public final class Repository implements AutoCloseable {
 
     private String debugInsertTraceIdBySpanName(String serviceSpanName, long timestamp, long traceId, int ttl) {
         return insertTraceIdBySpanName.getQueryString()
-                .replace(':' + KEY_MARKER, serviceSpanName)
-                .replace(':' + COLUMN_MARKER, String.valueOf(timestamp))
-                .replace(':' + VALUE_MARKER, String.valueOf(traceId))
-                .replace(':' + TTL_MARKER, String.valueOf(ttl));
+                .replace(":service_span_name", serviceSpanName)
+                .replace(":ts", String.valueOf(timestamp))
+                .replace(":trace_id", String.valueOf(traceId))
+                .replace(":ttl_", String.valueOf(ttl));
     }
 
     public Map<Long,Long> getTraceIdsByAnnotation(ByteBuffer annotationKey, long from, int limit) {
         try {
             BoundStatement bound = selectTraceIdsByAnnotations.bind()
-                    .setBytes(KEY_MARKER, annotationKey)
-                    .setLong(COLUMN_MARKER, from)
-                    .setInt(LIMIT_MARKER, limit);
+                    .setBytes("annotation", annotationKey)
+                    .setList("bucket", ALL_BUCKETS)
+                    .setDate("ts", new Date(from))
+                    .setInt("limit_", limit);
 
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugSelectTraceIdsByAnnotations(annotationKey, from, limit));
             }
             Map<Long,Long> traceIdsToTimestamps = new HashMap<>();
             for (Row row : session.execute(bound).all()) {
-                traceIdsToTimestamps.put(row.getBytes("value").getLong(), row.getLong("column1"));
+                traceIdsToTimestamps.put(row.getLong("trace_id"), row.getDate("ts").getTime());
             }
             return traceIdsToTimestamps;
         } catch (RuntimeException ex) {
@@ -705,21 +695,19 @@ public final class Repository implements AutoCloseable {
 
     private String debugSelectTraceIdsByAnnotations(ByteBuffer annotationKey, long from, int limit) {
         return selectTraceIdsByAnnotations.getQueryString()
-                        .replace(':' + KEY_MARKER, new String(Bytes.getArray(annotationKey)))
-                        .replace(':' + COLUMN_MARKER, String.valueOf(from))
-                        .replace(':' + LIMIT_MARKER, String.valueOf(limit));
+                        .replace(":annotation", new String(Bytes.getArray(annotationKey)))
+                        .replace(":ts", new Date(from).toString())
+                        .replace(":limit_", String.valueOf(limit));
     }
 
     public void storeTraceIdByAnnotation(ByteBuffer annotationKey, long timestamp, long traceId, int ttl) {
         try {
-            ByteBuffer traceIdBytes = ByteBuffer.allocate(8).putLong(traceId);
-            traceIdBytes.rewind();
-
             BoundStatement bound = insertTraceIdByAnnotation.bind()
-                    .setBytes(KEY_MARKER, annotationKey)
-                    .setLong(COLUMN_MARKER, timestamp)
-                    .setBytes(VALUE_MARKER, traceIdBytes)
-                    .setInt(TTL_MARKER, ttl);
+                    .setBytes("annotation", annotationKey)
+                    .setInt("bucket", RAND.nextInt(BUCKETS))
+                    .setDate("ts", new Date(timestamp))
+                    .setLong("trace_id", traceId)
+                    .setInt("ttl_", ttl);
 
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugInsertTraceIdByAnnotation(annotationKey, timestamp, traceId, ttl));
@@ -733,25 +721,26 @@ public final class Repository implements AutoCloseable {
 
     private String debugInsertTraceIdByAnnotation(ByteBuffer annotationKey, long timestamp, long traceId, int ttl) {
         return insertTraceIdByAnnotation.getQueryString()
-                .replace(':' + KEY_MARKER, new String(Bytes.getArray(annotationKey)))
-                .replace(':' + COLUMN_MARKER, String.valueOf(timestamp))
-                .replace(':' + VALUE_MARKER, String.valueOf(traceId))
-                .replace(':' + TTL_MARKER, String.valueOf(ttl));
+                .replace(":annotation", new String(Bytes.getArray(annotationKey)))
+                .replace(":ts", new Date(timestamp).toString())
+                .replace(":trace_id", String.valueOf(traceId))
+                .replace(":ttl_", String.valueOf(ttl));
     }
 
     public Map<Long,Long> getTraceDuration(boolean head, long[] traceIds) {
+
+        // @todo upgrade to aggregate functions in Cassandra-2.2
+        //  with min(..) and max(..) functions in CQL the logic here and above in CassandraSpanStore can be simplified
+        //  ref CASSANDRA-4914
+
         Preconditions.checkNotNull(traceIds);
-        Preconditions.checkArgument(0 < traceIds.length);
         List<ResultSetFuture> futures = new ArrayList<>();
         for (Long traceId : traceIds) {
             try {
-                assert null != traceId;
-                ByteBuffer key = ByteBuffer.allocate(8).putLong(traceId);
-                key.rewind();
 
                 BoundStatement bound = (head ? selectTraceDurationHead : selectTraceDurationTail)
                         .bind()
-                        .setBytes(KEY_MARKER, key);
+                        .setLong("trace_id", traceId);
 
                 if (LOG.isDebugEnabled()) {
                     LOG.debug(debugSelectTraceDuration(head, traceId));
@@ -766,26 +755,23 @@ public final class Repository implements AutoCloseable {
         Map<Long,Long> results = new HashMap<>();
         for (ResultSetFuture future : futures) {
             Row row = future.getUninterruptibly().one();
-            results.put(row.getBytes("key").getLong(), row.getLong("column1"));
+            results.put(row.getLong("trace_id"), row.getDate("ts").getTime());
         }
         return results;
     }
 
     private String debugSelectTraceDuration(boolean head, long traceId) {
         return (head ? selectTraceDurationHead : selectTraceDurationTail).getQueryString()
-                .replace(':' + KEY_MARKER, String.valueOf(traceId));
+                .replace(":trace_id", String.valueOf(traceId));
     }
 
     public void storeTraceDuration(long traceId, long timestamp, int ttl) {
         try {
-            ByteBuffer key = ByteBuffer.allocate(8).putLong(traceId);
-            key.rewind();
 
             BoundStatement bound = insertTraceDurations.bind()
-                    .setBytes(KEY_MARKER, key)
-                    .setLong(COLUMN_MARKER, timestamp)
-                    .setBytes(VALUE_MARKER, ByteBuffer.wrap("".getBytes()))
-                    .setInt(TTL_MARKER, ttl);
+                    .setLong("trace_id", traceId)
+                    .setDate("ts", new Date(timestamp))
+                    .setInt("ttl_", ttl);
 
             if (LOG.isDebugEnabled()) {
                 LOG.debug(debugInsertTraceDurations(traceId, timestamp, ttl));
@@ -799,10 +785,9 @@ public final class Repository implements AutoCloseable {
 
     private String debugInsertTraceDurations(long traceId, long timestamp, int ttl) {
         return insertTraceDurations.getQueryString()
-                .replace(':' + KEY_MARKER, String.valueOf(traceId))
-                .replace(':' + COLUMN_MARKER, String.valueOf(timestamp))
-                .replace(':' + VALUE_MARKER, "")
-                .replace(':' + TTL_MARKER, String.valueOf(ttl));
+                .replace(":trace_id", String.valueOf(traceId))
+                .replace(":ts", new Date(timestamp).toString())
+                .replace(":ttl_", String.valueOf(ttl));
     }
 
     private static List<Date> getDays(long from, long to) {
@@ -834,19 +819,28 @@ public final class Repository implements AutoCloseable {
 
         private static final String SCHEMA = "/cassandra-schema-cql3.txt";
 
-        static void ensureExists(String keyspace, Cluster cluster) {
+        static Map<String,String> ensureExists(String keyspace, Cluster cluster) {
+            Map<String,String> metadata = new HashMap<>();
             try (Session session = cluster.connect()) {
                 try (Reader reader = new InputStreamReader(Schema.class.getResourceAsStream(SCHEMA))) {
                     for (String cmd : String.format(CharStreams.toString(reader)).split(";")) {
-                        cmd = cmd.trim().replace(" zipkin", " " + keyspace);
+                        cmd = cmd.trim().replace(" " + KEYSPACE, " " + keyspace);
                         if (!cmd.isEmpty()) {
                             session.execute(cmd);
                         }
                     }
                 }
+                KeyspaceMetadata keyspaceMetadata = cluster.getMetadata().getKeyspace(keyspace);
+                Map<String,String> replicatn = keyspaceMetadata.getReplication();
+                if("SimpleStrategy".equals(replicatn.get("class")) && "1".equals(replicatn.get("replication_factor"))) {
+                    LOG.warn("running with RF=1, this is not suitable for production. Optimal is 3+");
+                }
+                Map<String,String> tracesCompaction = keyspaceMetadata.getTable("traces").getOptions().getCompaction();
+                metadata.put("traces.compaction.class", tracesCompaction.get("class"));
             } catch (IOException ex) {
                 LOG.error(ex.getMessage(), ex);
             }
+            return metadata;
         }
 
         private Schema() {}
