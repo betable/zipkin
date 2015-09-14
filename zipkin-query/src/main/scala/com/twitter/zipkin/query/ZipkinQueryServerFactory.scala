@@ -21,22 +21,23 @@ import com.twitter.app.App
 import com.twitter.finagle.stats.{DefaultStatsReceiver, StatsReceiver}
 import com.twitter.finagle.{ListeningServer, ThriftMux}
 import com.twitter.logging.Logger
+import com.twitter.zipkin.builder.ZipkinServerBuilder
 import com.twitter.zipkin.storage.{DependencyStore, NullDependencyStore, SpanStore}
 import com.twitter.zipkin.thriftscala.{DependencySource$FinagleService, ZipkinQuery$FinagleService}
 import org.apache.thrift.protocol.TBinaryProtocol.Factory
 
 trait ZipkinQueryServerFactory { self: App =>
-  val queryServicePort = flag("zipkin.queryService.port", new InetSocketAddress(9411), "port for the query service to listen on")
   val queryServiceDurationBatchSize = flag("zipkin.queryService.durationBatchSize", 500, "max number of durations to pull per batch")
 
   def newQueryServer(
     spanStore: SpanStore,
     dependencyStore: DependencyStore = new NullDependencyStore,
     stats: StatsReceiver = DefaultStatsReceiver.scope("QueryService"),
+    serverBuilder: ZipkinServerBuilder,
     log: Logger = Logger.get("QueryService")
   ): ListeningServer = {
     val impl = new ThriftQueryService(spanStore, dependencyStore, queryServiceDurationBatchSize())
-    ThriftMux.serve(queryServicePort(), composeQueryService(impl, stats))
+    ThriftMux.serve(new InetSocketAddress(serverBuilder.serverAddress, serverBuilder.serverPort), composeQueryService(impl, stats))
   }
 
   /**
