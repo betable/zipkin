@@ -1,9 +1,7 @@
 package com.twitter.zipkin.storage
 
 import com.google.common.net.InetAddresses._
-import com.twitter.conversions.time.intToTimeableNumber
 import com.twitter.util.Await.{ready, result}
-import com.twitter.util.Duration
 import com.twitter.zipkin.common.{Annotation, AnnotationType, BinaryAnnotation, Endpoint, Span}
 import java.net.InetAddress._
 import java.nio.ByteBuffer
@@ -62,45 +60,17 @@ abstract class SpanStoreSpec extends JUnitSuite with Matchers {
   val mergedSpan = Span(123, "methodcall", spanId, None,
     List(ann1, ann2), List(binaryAnnotation("BAH2", "BEH2")))
 
-  @Test def getSpansByTraceId() {
-    ready(store(Seq(span1)))
-
-    result(store.getSpansByTraceId(span1.traceId)) should be(Seq(span1))
-  }
-
   @Test def getSpansByTraceIds() {
     ready(store(Seq(span1, span2)))
 
     result(store.getSpansByTraceIds(Seq(span1.traceId))) should be(Seq(Seq(span1)))
-    result(store.getSpansByTraceIds(Seq(span1.traceId, span2.traceId))) should be(
+    result(store.getSpansByTraceIds(Seq(span1.traceId, span2.traceId, 111111))) should be(
       Seq(Seq(span1), Seq(span2))
     )
   }
 
   @Test def getSpansByTraceIds_empty() {
     result(store.getSpansByTraceIds(Seq(54321))) should be(empty)
-  }
-
-  @Test def getDataTimeToLive() {
-    // If a store doesn't use TTLs this should return Int.Max
-    assert(result(store.getDataTimeToLive()) > 0)
-  }
-
-  @Test def setTimeToLive() {
-    ready(store(Seq(span1)))
-    ready(store.setTimeToLive(span1.traceId, 1234.seconds))
-
-    // If a store doesn't use TTLs this should return Duration.Top
-    val ttl = result(store.getTimeToLive(span1.traceId))
-    assert(ttl == Duration.Top || (ttl - 1234.seconds).abs.inMilliseconds <= 10)
-  }
-
-  @Test def tracesExist() {
-    ready(store(Seq(span1, span4)))
-
-    result(store.tracesExist(Seq(span1.traceId, span4.traceId, 111111))) should be(
-      Set(span1.traceId, span4.traceId)
-    )
   }
 
   @Test def getSpanNames() {
@@ -124,29 +94,6 @@ abstract class SpanStoreSpec extends JUnitSuite with Matchers {
     result(store.getTraceIdsByName("badservice", None, 100, 3)) should be(empty)
     result(store.getTraceIdsByName("service", Some("badmethod"), 100, 3)) should be(empty)
     result(store.getTraceIdsByName("badservice", Some("badmethod"), 100, 3)) should be(empty)
-  }
-
-  @Test def getTracesDuration() {
-    ready(store(Seq(span1, span2, span3, span4)))
-
-    result(store.getTracesDuration(Seq(span1.traceId, span2.traceId, span3.traceId, span4.traceId))) should be(
-      Seq(
-        TraceIdDuration(span1.traceId, 19, 1),
-        TraceIdDuration(span2.traceId, 0, 2),
-        TraceIdDuration(span3.traceId, 18, 2),
-        TraceIdDuration(span4.traceId, 1, 6)
-      )
-    )
-
-    ready(store(Seq(span4)))
-
-    result(store.getTracesDuration(Seq(999))) should be(Seq(TraceIdDuration(999, 1, 6)))
-
-    // Add another span which happens after the first in the trace. In this case, the trace
-    // duration be the sum, not the max of span durations.
-    ready(store(Seq(span4.copy(annotations = List(ann7, ann8)))))
-
-    result(store.getTracesDuration(Seq(999))) should be(Seq(TraceIdDuration(999, 2, 6)))
   }
 
   @Test def getTraceIdsByAnnotation() {

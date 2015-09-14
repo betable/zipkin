@@ -15,19 +15,23 @@
  */
 
 import com.twitter.finagle.builder.ClientBuilder
-import com.twitter.finagle.redis.{Redis, Client}
-import com.twitter.zipkin.builder.Scribe
-import com.twitter.zipkin.redis
+import com.twitter.finagle.redis.{Client, Redis}
 import com.twitter.zipkin.collector.builder.CollectorServiceBuilder
+import com.twitter.zipkin.receiver.kafka.KafkaSpanReceiverFactory
 import com.twitter.zipkin.storage.Store
+import com.twitter.zipkin.redis
 
-val client = Client(ClientBuilder().hosts("0.0.0.0:6379")
+val host = sys.env.get("REDIS_HOST").getOrElse("0.0.0.0")
+val port = sys.env.get("REDIS_PORT").map(_.toInt).getOrElse(6379)
+
+val client = Client(ClientBuilder().hosts(host + ":" + port)
                                    .hostConnectionLimit(4)
                                    .hostConnectionCoresize(4)
                                    .codec(Redis())
                                    .build())
 
-val storeBuilder = Store.Builder(redis.SpanStoreBuilder(client))
-
-CollectorServiceBuilder(Scribe.Interface(categories = Set("zipkin")))
-  .writeTo(storeBuilder)
+val storeBuilder = Store.Builder(redis.SpanStoreBuilder(client, authPassword = sys.env.get("REDIS_PASSWORD")))
+val kafkaReceiver = sys.env.get("KAFKA_ZOOKEEPER").map(
+  KafkaSpanReceiverFactory.factory(_, sys.env.get("KAFKA_TOPIC").getOrElse("zipkin"))
+)
+CollectorServiceBuilder(storeBuilder, kafkaReceiver)

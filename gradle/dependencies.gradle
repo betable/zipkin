@@ -1,20 +1,57 @@
 // Adopted from https://github.com/ratpack/ratpack/blob/master/gradle/dependencies.gradle
 
 ext {
-    scalaVersion = '2.10.5'
-    scalaInterfaceVersion = '2.10'
+    scalaVersion = '2.11.7'
+    scalaInterfaceVersion = '2.11'
 
     commonVersions = [
-            algebird: '0.10.2',
-            finagle: '6.27.0',
-            scrooge: '3.20.0',
-            twitterUtil: '6.26.0',
-            twitterServer: '1.12.0',
-            ostrich: '9.10.0',
-            griddle: '1.7'
+            algebird: '0.11.0',
+            finagle: '6.28.0',
+            scrooge: '4.0.0',
+            twitterUtil: '6.27.0',
+            twitterServer: '1.13.0',
+            ostrich: '9.11.0',
+            griddle: '1.7',
+            slf4j: '1.7.2'
     ]
 
-    commonDependencies = [
-            slf4jLog4j12: "org.slf4j:slf4j-log4j12:1.6.4"  // Don't forget to use for configuration 'runtime' only
+    // Database drivers
+    // The keys are the valid values for the system property dbEngine.
+    // The values are the dependency to be used in the build to support the requested storage system.
+    //
+    // The default value of dbEngine is sqlite-persistent, defined in gradle.properties
+    // To override, run the build like this: ./gradlew build -PdbEngine=postgresql
+    anormDriverDependencies = [
+            "sqlite-memory": "org.xerial:sqlite-jdbc:3.8.11",  // sqlite-jdbc4 isn't out, yet
+            "sqlite-persistent": "org.xerial:sqlite-jdbc:3.8.11",
+            "h2-memory": "com.h2database:h2:1.4.187",
+            "h2-persistent": "com.h2database:h2:1.4.187",
+            // Don't add EOL versions! http://www.postgresql.org/support/versioning
+            "postgresql": "org.postgresql:postgresql:9.3-1103-jdbc4",
+            "mysql": "mysql:mysql-connector-java:5.1.36"
     ]
+}
+
+subprojects { subproject ->
+    configurations.all {
+        resolutionStrategy {
+            eachDependency { DependencyResolveDetails details ->
+                // Ensures libthrift 0.5.0 isn't accidentally in the classpath
+                if (details.requested.group == 'org.apache.thrift') {
+                  details.useVersion '0.9.0' // https://github.com/twitter/scrooge/issues/203
+                }
+                // Don't use mixed versions of SLF4J
+                if (details.requested.group == 'org.slf4j') {
+                  details.useVersion commonVersions.slf4j
+                }
+            }
+        }
+
+        // Some dependencies early bound slf4j impl
+        exclude module: "log4j-over-slf4j"
+        exclude module: "slf4j-logback"
+        // logback shouldn't be bound, yet, and also http://jira.qos.ch/browse/LOGBACK-1071
+        exclude module: "logback-classic"
+        exclude module: "logback-core"
+     }
 }

@@ -13,15 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import com.twitter.zipkin.builder.Scribe
-import com.twitter.zipkin.anormdb.{SpanStoreBuilder, AggregatesBuilder}
+
+import com.twitter.zipkin.anormdb.{SpanStoreBuilder, DependencyStoreBuilder}
+import com.twitter.zipkin.receiver.kafka.KafkaSpanReceiverFactory
 import com.twitter.zipkin.storage.anormdb.DB
 import com.twitter.zipkin.collector.builder.CollectorServiceBuilder
 import com.twitter.zipkin.storage.Store
 
 val db = DB()
 
-val storeBuilder = Store.Builder(SpanStoreBuilder(db, true), AggregatesBuilder(db))
+val storeBuilder = Store.Builder(SpanStoreBuilder(db, true), DependencyStoreBuilder(db))
+val kafkaReceiver = sys.env.get("KAFKA_ZOOKEEPER").map(
+  KafkaSpanReceiverFactory.factory(_, sys.env.get("KAFKA_TOPIC").getOrElse("zipkin"))
+)
 
-CollectorServiceBuilder(Scribe.Interface(categories = Set("zipkin")))
-  .writeTo(storeBuilder)
+CollectorServiceBuilder(storeBuilder, kafkaReceiver)

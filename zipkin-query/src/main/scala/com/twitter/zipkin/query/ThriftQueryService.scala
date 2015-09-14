@@ -16,8 +16,8 @@
  */
 package com.twitter.zipkin.query
 
-import com.twitter.conversions.time._
-import com.twitter.finagle.stats.{StatsReceiver, DefaultStatsReceiver, Stat}
+import com.google.common.base.Charsets.UTF_8
+import com.twitter.finagle.stats.{DefaultStatsReceiver, Stat, StatsReceiver}
 import com.twitter.finagle.tracing.{Trace => FTrace}
 import com.twitter.logging.Logger
 import com.twitter.util.{Future, Time}
@@ -31,58 +31,26 @@ import java.nio.ByteBuffer
 
 class ThriftQueryService(
   spanStore: SpanStore,
-  aggsStore: Aggregates = new NullAggregates,
-  adjusters: Map[thriftscala.Adjust, Adjuster] = Map.empty[thriftscala.Adjust, Adjuster],
+  dependencyStore: DependencyStore = new NullDependencyStore,
   traceDurationFetchBatchSize: Int = 500,
   stats: StatsReceiver = DefaultStatsReceiver.scope("ThriftQueryService"),
   log: Logger = Logger.get("ThriftQueryService")
-) extends thriftscala.ZipkinQuery[Future] {
+) extends thriftscala.ZipkinQuery[Future] with thriftscala.DependencySource[Future] {
 
   private[this] val methodStats = stats.scope("perMethod")
+  private val timeSkewAdjuster = new TimeSkewAdjuster()
 
   private[this] def opt[T](param: T): Option[T] = param match {
     case null | "" => None
     case s => Some(s)
   }
 
-  private[this] def getTraceIdDurations(fIds: Future[Seq[Long]]): Future[Seq[TraceIdDuration]] = {
-    fIds flatMap { ids =>
-      val ret = ids.grouped(traceDurationFetchBatchSize).toSeq.map(spanStore.getTracesDuration(_))
-      Future.collect(ret).map(_.flatten)
+  private[this] def adjustedTraces(spans: Seq[Seq[Span]], adjustClockSkew: Boolean): Seq[Trace] = {
+    val traces = spans.map(Trace(_))
+    if (adjustClockSkew) {
+      traces.map(t => timeSkewAdjuster.adjust(_))
     }
-  }
-
-  private[this] def sortedTraceIds(traceIds: Future[Seq[IndexedTraceId]], limit: Int, order: thriftscala.Order): Future[Seq[Long]] = {
-    order match {
-      case thriftscala.Order.None =>
-        traceIds.map(_.slice(0, limit).map(_.traceId))
-
-      case thriftscala.Order.TimestampDesc | thriftscala.Order.TimestampAsc =>
-        val orderBy = order match {
-          case thriftscala.Order.TimestampDesc => (a: IndexedTraceId, b: IndexedTraceId) => a.timestamp > b.timestamp
-          case thriftscala.Order.TimestampAsc => (a: IndexedTraceId, b: IndexedTraceId) => a.timestamp < b.timestamp
-          case _ => throw new Exception("what?")
-        }
-        traceIds.map { _.sortWith(orderBy).slice(0, limit).map(_.traceId) }
-
-      case thriftscala.Order.DurationDesc | thriftscala.Order.DurationAsc =>
-        val orderBy = order match {
-          case thriftscala.Order.DurationDesc => (a: TraceIdDuration, b: TraceIdDuration) => a.duration > b.duration
-          case thriftscala.Order.DurationAsc => (a: TraceIdDuration, b: TraceIdDuration) => a.duration < b.duration
-          case _ => throw new Exception("what?")
-        }
-        getTraceIdDurations(traceIds.map(_.map(_.traceId))) map { _.sortWith(orderBy).slice(0, limit).map(_.traceId) }
-    }
-  }
-
-  private[this] def sort(traces: Future[Seq[IndexedTraceId]], limit: Int, order: thriftscala.Order): Future[Seq[Long]] =
-    sortedTraceIds(traces, limit, order)
-
-  private[this] def adjustedTraces(traces: Seq[Seq[Span]], adjusts: Seq[thriftscala.Adjust]): Seq[Trace] = {
-    val as = adjusts flatMap { adjusters.get(_) }
-    traces map { spans =>
-      as.foldLeft(Trace(spans)) { (t, adjuster) => adjuster.adjust(t) }
-    }
+    traces
   }
 
   private[this] def padTimestamp(timestamp: Long): Long =
@@ -105,19 +73,9 @@ class ThriftQueryService(
 
   private[this] def queryResponse(
     ids: Seq[IndexedTraceId],
-    qr: thriftscala.QueryRequest,
-    endTs: Long = -1
-  ): Future[thriftscala.QueryResponse] = {
-    sortedTraceIds(Future.value(ids), qr.limit, qr.order) map { sortedIds =>
-      val (min, max) = sortedIds match {
-        case Nil =>
-          (-1L, endTs)
-        case _   =>
-          val ts = ids.map(_.timestamp)
-          (ts.min, ts.max)
-      }
-      thriftscala.QueryResponse(sortedIds, min, max)
-    }
+    qr: thriftscala.QueryRequest
+  ): Future[Seq[Long]] = {
+    Future.value(ids.slice(0, qr.limit).map(_.traceId))
   }
 
   private trait SliceQuery
@@ -152,163 +110,71 @@ class ThriftQueryService(
   }
 
   private[this] val noServiceNameError = Future.exception(thriftscala.QueryException("No service name provided"))
-  private[this] def handleQuery[T](name: String, qr: thriftscala.QueryRequest)(f: => Future[T]): Future[T] =
+
+  private[this] def handleQuery[T](name: String, qr: thriftscala.QueryRequest)(f: => Future[T]): Future[T] = {
     if (!opt(qr.serviceName).isDefined) noServiceNameError else {
       FTrace.recordBinary("serviceName", qr.serviceName)
       FTrace.recordBinary("endTs", qr.endTs)
       FTrace.recordBinary("limit", qr.limit)
-      FTrace.recordBinary("order", qr.order)
       handle(name)(f)
     }
+  }
 
-  def getTraceIds(qr: thriftscala.QueryRequest): Future[thriftscala.QueryResponse] =
-    handleQuery("getTraceIds", qr) {
-      val sliceQueries = Seq[Option[Seq[SliceQuery]]](
-        qr.spanName.map { n => Seq(SpanSliceQuery(n)) },
-        qr.annotations.map { _.map { AnnotationSliceQuery(_, None) } },
-        qr.binaryAnnotations.map { _.map { b => AnnotationSliceQuery(b.key, Some(b.value)) } }
-      ).flatten.flatten
+  def traceIds(qr: thriftscala.QueryRequest): Future[Seq[Long]] = {
+    val sliceQueries = Seq[Option[Seq[SliceQuery]]](
+      qr.spanName.map { n => Seq(SpanSliceQuery(n)) },
+      qr.annotations.map { _.map { AnnotationSliceQuery(_, None) } },
+      qr.binaryAnnotations.map { _.map { e => AnnotationSliceQuery(e._1, Some(ByteBuffer.wrap(e._2.getBytes(UTF_8)))) }(collection.breakOut) }
+    ).flatten.flatten
 
-      sliceQueries match {
-        case Nil =>
-          spanStore.getTraceIdsByName(qr.serviceName, None, qr.endTs, qr.limit) flatMap {
-            queryResponse(_, qr)
+    sliceQueries match {
+      case Nil =>
+        spanStore.getTraceIdsByName(qr.serviceName, None, qr.endTs, qr.limit) flatMap {
+          queryResponse(_, qr)
+        }
+
+      case slice :: Nil =>
+        querySlices(sliceQueries, qr) flatMap { ids => queryResponse(ids.flatten, qr) }
+
+      case _ =>
+        // TODO: timestamps endTs is the wrong name for all this
+        querySlices(sliceQueries, qr.copy(limit = 1)) flatMap { ids =>
+          val ts = padTimestamp(ids.flatMap(_.map(_.timestamp)).reduceOption(_ min _).getOrElse(0))
+          querySlices(sliceQueries, qr.copy(endTs = ts)) flatMap { ids =>
+            queryResponse(traceIdsIntersect(ids), qr)
           }
-
-        case slice :: Nil =>
-          querySlices(sliceQueries, qr) flatMap { ids => queryResponse(ids.flatten, qr) }
-
-        case _ =>
-          // TODO: timestamps endTs is the wrong name for all this
-          querySlices(sliceQueries, qr.copy(limit = 1)) flatMap { ids =>
-            val ts = padTimestamp(ids.flatMap(_.map(_.timestamp)).reduceOption(_ min _).getOrElse(0))
-            querySlices(sliceQueries, qr.copy(endTs = ts)) flatMap { ids =>
-              traceIdsIntersect(ids) match {
-                case Nil =>
-                  val endTs = ids.map(_.map(_.timestamp).reduceOption(_ min _).getOrElse(0L)).reduceOption(_ max _).getOrElse(0L)
-                  queryResponse(Nil, qr, endTs)
-                case seq =>
-                  queryResponse(seq, qr)
-              }
-            }
-          }
-      }
-    }
-
-  def getTraceIdsBySpanName(
-    serviceName: String,
-    spanName: String,
-    endTs: Long,
-    limit: Int,
-    order: thriftscala.Order
-  ): Future[Seq[Long]] = {
-    val qr = thriftscala.QueryRequest(serviceName, opt(spanName), None, None, endTs, limit, order)
-    handleQuery("getTraceIdsBySpanName", qr) {
-      sort(spanStore.getTraceIdsByName(serviceName, qr.spanName, endTs, limit), limit, order)
+        }
     }
   }
 
-  def getTraceIdsByServiceName(
-    serviceName: String,
-    endTs: Long,
-    limit: Int,
-    order: thriftscala.Order
-  ): Future[Seq[Long]] = {
-    val qr = thriftscala.QueryRequest(serviceName, None, None, None, endTs, limit, order)
-    handleQuery("getTraceIdsBySpanName", qr) {
-      sort(spanStore.getTraceIdsByName(serviceName, None, endTs, limit), limit, order)
-    }
-  }
-
-  def getTraceIdsByAnnotation(
-    serviceName: String,
-    key: String,
-    value: ByteBuffer,
-    endTs: Long,
-    limit: Int,
-    order: thriftscala.Order
-  ): Future[Seq[Long]] = {
-    val qr = thriftscala.QueryRequest(serviceName, None, None, None, endTs, limit, order)
-    handleQuery("getTraceIdsByAnnotation", qr) {
-      sort(spanStore.getTraceIdsByAnnotation(serviceName, key, opt(value), endTs, limit), limit, order)
-    }
-  }
-
-  def tracesExist(traceIds: Seq[Long]): Future[Set[Long]] =
-    handle("tracesExist") {
-      FTrace.recordBinary("numIds", traceIds.length)
-      spanStore.tracesExist(traceIds)
+  override def getTraces(qr: thriftscala.QueryRequest): Future[Seq[thriftscala.Trace]] =
+    handleQuery("getTraces", qr) {
+      traceIds(qr).flatMap(getTracesByIds(_, qr.adjustClockSkew))
     }
 
-  def getTracesByIds(traceIds: Seq[Long], adjust: Seq[thriftscala.Adjust]): Future[Seq[thriftscala.Trace]] =
+  override def getTracesByIds(traceIds: Seq[Long], adjustClockSkew: Boolean = true): Future[Seq[thriftscala.Trace]] =
     handle("getTracesByIds") {
-      FTrace.recordBinary("numIds", traceIds.length)
-      spanStore.getSpansByTraceIds(traceIds) map { adjustedTraces(_, adjust).map(_.toThrift) }
-    }
-
-  def getTraceTimelinesByIds(traceIds: Seq[Long], adjust: Seq[thriftscala.Adjust]): Future[Seq[thriftscala.TraceTimeline]] =
-    handle("getTraceTimelinesByIds") {
-      FTrace.recordBinary("numIds", traceIds.length)
-      spanStore.getSpansByTraceIds(traceIds) map { traces =>
-        adjustedTraces(traces, adjust) flatMap { TraceTimeline(_).map(_.toThrift) }
+      if (traceIds.isEmpty) {
+        return Future.value(Seq.empty)
       }
-    }
-
-  def getTraceSummariesByIds(traceIds: Seq[Long], adjust: Seq[thriftscala.Adjust]): Future[Seq[thriftscala.TraceSummary]] =
-    handle("getTraceSummariesByIds") {
       FTrace.recordBinary("numIds", traceIds.length)
-      spanStore.getSpansByTraceIds(traceIds) map { traces =>
-        adjustedTraces(traces, adjust) flatMap { TraceSummary(_).map(_.toThrift) }
-      }
+      spanStore.getSpansByTraceIds(traceIds) map { adjustedTraces(_, adjustClockSkew).map(_.toThrift) }
     }
 
-  def getTraceCombosByIds(traceIds: Seq[Long], adjust: Seq[thriftscala.Adjust]): Future[Seq[thriftscala.TraceCombo]] =
-    handle("getTraceCombosByIds") {
-      FTrace.recordBinary("numIds", traceIds.length)
-      spanStore.getSpansByTraceIds(traceIds) map { traces =>
-        adjustedTraces(traces, adjust) map { TraceCombo(_).toThrift }
-      }
-    }
-
-  def getDataTimeToLive: Future[Int] =
-    handle("getDataTimeToLive") {
-      spanStore.getDataTimeToLive()
-    }
-
-  def getServiceNames: Future[Set[String]] =
+  override def getServiceNames: Future[Set[String]] =
     handle("getServiceNames") {
       spanStore.getAllServiceNames
     }
 
-  def getSpanNames(serviceName: String): Future[Set[String]] =
+  override def getSpanNames(serviceName: String): Future[Set[String]] =
     handle("getSpanNames") {
       spanStore.getSpanNames(serviceName)
     }
 
-  def setTraceTimeToLive(traceId: Long, ttl: Int): Future[Unit] =
-    handle("setTraceTimeToLive") {
-      spanStore.setTimeToLive(traceId, ttl.seconds)
-    }
-
-  def getTraceTimeToLive(traceId: Long): Future[Int] =
-    handle("getTraceTimeToLive") {
-      spanStore.getTimeToLive(traceId).map(_.inSeconds)
-    }
-
-  def getDependencies(startTime: Option[Long], endTime: Option[Long]) : Future[thriftscala.Dependencies] =
+  override def getDependencies(startTime: Option[Long], endTime: Option[Long]) : Future[thriftscala.Dependencies] =
     handle("getDependencies") {
       val start = startTime map { Time.fromMicroseconds(_) }
       val end = endTime map { Time.fromMicroseconds(_) }
-      aggsStore.getDependencies(start, end).map(_.toThrift)
-    }
-
-  def getTopAnnotations(serviceName: String): Future[Seq[String]] =
-    handle("getTopAnnotations") {
-      aggsStore.getTopAnnotations(serviceName)
-    }
-
-  def getTopKeyValueAnnotations(serviceName: String): Future[Seq[String]] =
-    handle("getTopKeyValueAnnotations") {
-      aggsStore.getTopKeyValueAnnotations(serviceName)
+      dependencyStore.getDependencies(start, end).map(_.toThrift)
     }
 }

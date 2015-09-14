@@ -4,7 +4,7 @@ import com.fasterxml.jackson.core.JsonGenerator
 import com.fasterxml.jackson.databind.module.SimpleModule
 import com.fasterxml.jackson.databind.{ObjectMapper, SerializerProvider, JsonSerializer}
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
-import com.twitter.zipkin.query.{TraceTimeline, TraceSummary, Trace}
+import com.twitter.zipkin.query.Trace
 import com.twitter.zipkin.common.Endpoint
 
 /**
@@ -23,8 +23,6 @@ class ZipkinJson {
 
   // --- (SERIALIZERS) ---
   module.addSerializer(classOf[Trace], new ZipkinJsonSerializer(JsonTrace.wrap))
-  module.addSerializer(classOf[TraceSummary], new ZipkinJsonSerializer(JsonTraceSummary.wrap))
-  module.addSerializer(classOf[TraceTimeline], new ZipkinJsonSerializer(JsonTraceTimeline.wrap))
   module.addSerializer(classOf[Endpoint], new ZipkinJsonSerializer(JsonEndpoint.wrap))
 
   mapper.registerModule(module)

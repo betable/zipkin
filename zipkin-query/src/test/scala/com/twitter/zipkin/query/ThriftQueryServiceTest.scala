@@ -16,14 +16,13 @@
  */
 package com.twitter.zipkin.query
 
-import java.nio.ByteBuffer
-
 import com.twitter.util.Await
 import com.twitter.zipkin.common._
 import com.twitter.zipkin.conversions.thrift._
 import com.twitter.zipkin.storage.InMemorySpanStore
 import com.twitter.zipkin.thriftscala
 import org.scalatest.FunSuite
+import java.nio.ByteBuffer
 
 class ThriftQueryServiceTest extends FunSuite {
   val ep1 = Endpoint(123, 123, "service1")
@@ -78,120 +77,42 @@ class ThriftQueryServiceTest extends FunSuite {
 
     // exception on null serviceName
     intercept[thriftscala.QueryException] {
-      Await.result(svc.getTraceIdsBySpanName(null, "span", 100, 100, thriftscala.Order.DurationDesc))
+      Await.result(svc.getTraces(thriftscala.QueryRequest(null, Some("span"), None, None, 100, 100)))
     }
 
-    val actual = Await.result(svc.getTraceIdsBySpanName("service2", "methodcall", 1000, 50, thriftscala.Order.DurationDesc))
-    assert(actual === Seq(2, 2))
+    val actual = Await.result(svc.getTraces(thriftscala.QueryRequest("service2", Some("methodcall"), None, None, 1000, 50)))
+    assert(actual.map(_.spans.head.traceId) === Seq(2, 2))
   }
 
-  test("order results") {
+  test("find traces by service name") {
     val svc = newLoadedService()
-
-    // desc
-    val actualDesc = Await.result(svc.getTraceIdsByServiceName("service3", 1000, 50, thriftscala.Order.DurationDesc))
-    assert(actualDesc === Seq(3, 5))
-
-    // asc
-    val actualAsc = Await.result(svc.getTraceIdsByServiceName("service3", 1000, 50, thriftscala.Order.DurationAsc))
-    assert(actualAsc === Seq(5, 3))
-
-    // none
-    val actualNone = Await.result(svc.getTraceIdsByServiceName("service3", 1000, 50, thriftscala.Order.None))
-    assert(actualNone === Seq(3, 5))
+    val actual = Await.result(svc.getTraces(thriftscala.QueryRequest("service3", None, None, None, 1000, 50)))
+    assert(actual.map(_.spans.head.traceId) === Seq(3, 5))
   }
 
-  test("trace summary for trace id") {
+  test("find traces by annotation name") {
     val svc = newLoadedService()
-    val actual = Await.result(svc.getTraceSummariesByIds(List(1), List()))
-    assert(actual === List(TraceSummary(
-      1,
-      100,
-      150,
-      50,
-      List(SpanTimestamp("service1", 100, 150)),
-      List(ep1)
-    ).toThrift))
+    val actual = Await.result(svc.getTraces(thriftscala.QueryRequest("service3", None, Some(Seq("annotation")), None, 1000, 50)))
+    assert(actual.map(_.spans.head.traceId) === Seq(5))
   }
 
-  test("trace combo for trace id") {
+  test("find traces by annotation name and value") {
     val svc = newLoadedService()
+    val keyValue = Map("annotation" -> "ann")
 
-    val trace = trace1.toThrift
-    val summary = TraceSummary(
-      1,
-      100,
-      150,
-      50,
-      List(SpanTimestamp("service1", 100, 150)),
-      List(ep1)
-    ).toThrift
-    val timeline = TraceTimeline(trace1) map { _.toThrift }
-    val combo = thriftscala.TraceCombo(trace, Some(summary), timeline, Some(Map(666L -> 1)))
-
-    val actual = Await.result(svc.getTraceCombosByIds(List(1), List()))
-    assert(actual === Seq(combo))
+    val actual = Await.result(svc.getTraces(thriftscala.QueryRequest("service3", None, None, Some(keyValue), 1000, 50)))
+    assert(actual.map(_.spans.head.traceId) === Seq(5))
   }
 
-  test("find trace ids by service name") {
+  test("get traces by traceId") {
     val svc = newLoadedService()
-    val actual = Await.result(svc.getTraceIdsByServiceName("service3", 1000, 50, thriftscala.Order.DurationDesc))
-    assert(actual === Seq(3, 5))
-  }
-
-  test("find trace ids by annotation name") {
-    val svc = newLoadedService()
-    val actual = Await.result(svc.getTraceIdsByAnnotation("service3", "annotation", null, 1000, 50, thriftscala.Order.DurationDesc))
-    assert(actual === Seq(5))
-  }
-
-  test("find trace ids by annotation name and value") {
-    val svc = newLoadedService()
-    val actual = Await.result(svc.getTraceIdsByAnnotation("service3", "annotation", ByteBuffer.wrap("ann".getBytes), 1000, 50, thriftscala.Order.DurationDesc))
-    assert(actual === Seq(5))
-  }
-
-  test("get trace by traceId") {
-    val svc = newLoadedService()
-    val actual = Await.result(svc.getTracesByIds(List(1L), List()))
+    val actual = Await.result(svc.getTracesByIds(List(1L)))
     assert(actual === List(trace1.toThrift))
-  }
-
-  test("get timeline by traceId") {
-    val svc = newLoadedService()
-
-    val ann1 = thriftscala.TimelineAnnotation(100, thriftscala.Constants.CLIENT_SEND,
-      ep1.toThrift, 666, None, "service1", "methodcall")
-    val ann2 = thriftscala.TimelineAnnotation(150, thriftscala.Constants.CLIENT_RECV,
-      ep1.toThrift, 666, None, "service1", "methodcall")
-    val ann3 = thriftscala.TimelineAnnotation(101, thriftscala.Constants.CLIENT_SEND,
-      ep2.toThrift, 667, None, "service2", "methodcall")
-    val ann4 = thriftscala.TimelineAnnotation(501, thriftscala.Constants.CLIENT_RECV,
-      ep2.toThrift, 667, None, "service2", "methodcall")
-    val ann5 = thriftscala.TimelineAnnotation(110, thriftscala.Constants.SERVER_RECV,
-      ep2.toThrift, 666, None, "service2", "methodcall")
-    val ann6 = thriftscala.TimelineAnnotation(140, thriftscala.Constants.SERVER_SEND,
-      ep2.toThrift, 666, None, "service2", "methodcall")
-
-    val control = List(thriftscala.TraceTimeline(2L, 666, List(ann1, ann3, ann5, ann6, ann2, ann4), List()))
-    val actual = Await.result(svc.getTraceTimelinesByIds(List(2L), List(thriftscala.Adjust.Nothing, thriftscala.Adjust.TimeSkew)))
-    assert(actual === control)
   }
 
   test("get span names") {
     val svc = newLoadedService()
     val actual = Await.result(svc.getSpanNames("service3"))
     assert(actual === Set("methodcall", "otherMethod"))
-  }
-
-  test("get/set trace TTL") {
-    val svc = newLoadedService()
-
-    val original = Await.result(svc.getTraceTimeToLive(1))
-    assert(original === 1)
-
-    Await.ready(svc.setTraceTimeToLive(1, 100))
-    val newVal = Await.result(svc.getTraceTimeToLive(1))
-    assert(newVal === 100)
   }
 }

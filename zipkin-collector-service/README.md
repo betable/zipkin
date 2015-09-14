@@ -11,15 +11,25 @@ store, most typically SQL, Cassandra or Redis.
 ./gradlew :zipkin-collector-service:run
 ```
 
-#### Start with Cassandra Authentication
+#### Configuration
 
-Will throw an exception on startup if authentication failed
+`zipkin-collector-service` applies configuration parameters through environment variables.
+
+Below are links to environment variables definitions.
+
+* Span Receivers
+  * [kafka](https://github.com/openzipkin/zipkin/blob/master/zipkin-receiver-kafka/README.md)
+
+* Span Storage
+  * [dev and mysql](https://github.com/openzipkin/zipkin/blob/master/zipkin-anormdb/README.md)
+  * [cassandra](https://github.com/openzipkin/zipkin/blob/master/zipkin-cassandra/README.md)
+  * [redis](https://github.com/openzipkin/zipkin/blob/master/zipkin-redis/README.md)
+
+Example usage:
+
+```bash
+$ MYSQL_USER=root ./bin/collector mysql
 ```
-# specify user/pass as environment variables
-CASSANDRA_USER=user CASSANDRA_PASS=pass ./bin/collector cassandra
-
-```
-
 
 ## Building and running a fat jar
 
@@ -39,4 +49,5 @@ bundled configurations below.
 
 * `/collector-dev.scala` - file-based SQL backend
 * `/collector-cassandra.scala` - localhost cassandra backend
+* `/collector-mysql.scala` - MySQL backend
 * `/collector-redis.scala` - localhost redis backend

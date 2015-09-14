@@ -22,7 +22,7 @@ import com.twitter.zipkin.Constants
 import com.twitter.zipkin.common.Span
 import com.twitter.zipkin.conversions.thrift._
 import com.twitter.zipkin.thriftscala.{Span => ThriftSpan}
-import com.twitter.zipkin.storage.{TraceIdDuration, IndexedTraceId, SpanStore}
+import com.twitter.zipkin.storage.{IndexedTraceId, SpanStore}
 import com.twitter.zipkin.util.Util
 import java.nio.ByteBuffer
 import org.twitter.zipkin.storage.cassandra.Repository
@@ -34,7 +34,7 @@ object CassandraSpanStoreDefaults {
   val SpanTtl = 7.days
   val IndexTtl = 3.days
   val MaxTraceCols = 100000
-  val SpanCodec = new SnappyCodec(new ScroogeThriftCodec[ThriftSpan](ThriftSpan))
+  val SpanCodec = new ScroogeThriftCodec[ThriftSpan](ThriftSpan)
 }
 
 class CassandraSpanStore(
@@ -44,10 +44,8 @@ class CassandraSpanStore(
   indexTtl: Duration = CassandraSpanStoreDefaults.IndexTtl,
   maxTraceCols: Int = CassandraSpanStoreDefaults.MaxTraceCols
 ) extends SpanStore {
-  private[this] val ServiceNamesKey = "servicenames"
   private[this] val IndexDelimiter = ":"
   private[this] val IndexDelimiterBytes = IndexDelimiter.getBytes
-  private[this] val SomeIndexTtl = Some(indexTtl)
   private[this] val spanCodec = CassandraSpanStoreDefaults.SpanCodec
 
   /**
@@ -85,17 +83,13 @@ class CassandraSpanStore(
   private[this] val IndexAnnotationCounter = IndexStats.scope("annotation").counter("standard")
   private[this] val IndexAnnotationNoLastAnnotationCounter = IndexStats.scope("annotation").counter("noLastAnnotation")
   private[this] val IndexBinaryAnnotationCounter = IndexStats.scope("annotation").counter("binary")
-  private[this] val IndexDurationCounter = IndexStats.counter("duration")
   private[this] val QueryStats = stats.scope("query")
-  private[this] val QueryGetTtlCounter = QueryStats.counter("getTimeToLive")
-  private[this] val QueryTracesExistStat = QueryStats.stat("tracesExist")
   private[this] val QueryGetSpansByTraceIdsStat = QueryStats.stat("getSpansByTraceIds")
   private[this] val QueryGetSpansByTraceIdsTooBigCounter = QueryStats.scope("getSpansByTraceIds").counter("tooBig")
   private[this] val QueryGetServiceNamesCounter = QueryStats.counter("getServiceNames")
   private[this] val QueryGetSpanNamesCounter = QueryStats.counter("getSpanNames")
   private[this] val QueryGetTraceIdsByNameCounter = QueryStats.counter("getTraceIdsByName")
   private[this] val QueryGetTraceIdsByAnnotationCounter = QueryStats.counter("getTraceIdsByAnnotation")
-  private[this] val QueryGetTracesDurationStat = QueryStats.stat("getTracesDuration")
 
   /**
    * Internal indexing helpers
@@ -106,7 +100,6 @@ class CassandraSpanStore(
       case "" =>
         IndexServiceNameNoNameCounter.incr()
       case s =>
-        // @xxx so many identical writes going to the one partition key is bad. implement caching of writes.
         repository.storeServiceName(s.toLowerCase, indexTtl.inSeconds)
     }
   }
@@ -178,19 +171,12 @@ class CassandraSpanStore(
     }
   }
 
-  private[this] def indexSpanDuration(span: Span) {
-    Seq(span.firstAnnotation, span.lastAnnotation).flatten foreach { a =>
-      IndexDurationCounter.incr()
-      repository.storeTraceDuration(span.traceId, a.timestamp, indexTtl.inSeconds)
-    }
-  }
-
   private[this] def getSpansByTraceIds(traceIds: Seq[Long], count: Int): Future[Seq[Seq[Span]]] = {
     pool {
       val spans = repository.getSpansByTraceIds(traceIds.toArray.map(Long.box), count)
         .mapValues { case spans :java.util.List[ByteBuffer] => spans.asScala.map(spanCodec.decode(_).toSpan) }
 
-      traceIds.map(traceId => spans.get(traceId)).flatten.toSeq
+      traceIds.map(traceId => spans.get(traceId)).flatten
     }
   }
 
@@ -199,7 +185,7 @@ class CassandraSpanStore(
    */
   override def close() = repository.close()
 
-  def apply(spans: Seq[Span]): Future[Unit] = {
+  override def apply(spans: Seq[Span]): Future[Unit] = {
     SpansStoredCounter.incr(spans.size)
 
     spans foreach { span =>
@@ -216,71 +202,34 @@ class CassandraSpanStore(
         indexSpanNameByService(span)
         indexTraceIdByName(span)
         indexByAnnotations(span)
-        indexSpanDuration(span)
       }
     }
 
     Future.Unit
   }
 
-  def setTimeToLive(traceId: Long, ttl: Duration): Future[Unit] = {
-    getSpansByTraceId(traceId).get foreach { span =>
-      repository.storeSpan(
-        traceId,
-        span.lastTimestamp.getOrElse(span.firstTimestamp.getOrElse(0)),
-        createSpanColumnName(span),
-        spanCodec.encode(span.toThrift),
-        ttl.inSeconds)
-    }
-    Future.Unit
-  }
-
-  def getTimeToLive(traceId: Long): Future[Duration] = {
-    QueryGetTtlCounter.incr()
-
-    pool {
-      Duration(repository.getSpanTtlSeconds(traceId), java.util.concurrent.TimeUnit.SECONDS)
-    }
-  }
-
-  override def getDataTimeToLive = Future.value(spanTtl.inSeconds)
-
-  def tracesExist(traceIds: Seq[Long]): Future[Set[Long]] = {
-    QueryTracesExistStat.add(traceIds.size)
-    pool {
-      repository
-        .tracesExist(traceIds.toArray.map(Long.box))
-        .map(_.asInstanceOf[Long])
-        .toSet
-    }
-  }
-
-  def getSpansByTraceId(traceId: Long): Future[Seq[Span]] =
-    getSpansByTraceIds(Seq(traceId)).map(_.head)
-
-  def getSpansByTraceIds(traceIds: Seq[Long]): Future[Seq[Seq[Span]]] = {
+  override def getSpansByTraceIds(traceIds: Seq[Long]): Future[Seq[Seq[Span]]] = {
     QueryGetSpansByTraceIdsStat.add(traceIds.size)
     getSpansByTraceIds(traceIds, maxTraceCols)
   }
 
-  def getAllServiceNames: Future[Set[String]] = {
+  override def getAllServiceNames: Future[Set[String]] = {
     QueryGetServiceNamesCounter.incr()
     pool { repository.getServiceNames.asScala.toSet }
   }
 
-  def getSpanNames(service: String): Future[Set[String]] = {
+  override def getSpanNames(service: String): Future[Set[String]] = {
     QueryGetSpanNamesCounter.incr()
     pool { repository.getSpanNames(service).asScala.toSet }
   }
 
-  def getTraceIdsByName(
+  override def getTraceIdsByName(
     serviceName: String,
     spanName: Option[String],
     endTs: Long,
     limit: Int
   ): Future[Seq[IndexedTraceId]] = {
     QueryGetTraceIdsByNameCounter.incr()
-    val key = nameKey(serviceName, spanName)
 
     pool {
       (spanName match {
@@ -294,7 +243,7 @@ class CassandraSpanStore(
     }
   }
 
-  def getTraceIdsByAnnotation(
+  override def getTraceIdsByAnnotation(
     serviceName: String,
     annotation: String,
     value: Option[ByteBuffer],
@@ -302,37 +251,12 @@ class CassandraSpanStore(
     limit: Int
   ): Future[Seq[IndexedTraceId]] = {
     QueryGetTraceIdsByAnnotationCounter.incr()
-    val key = annotationKey(serviceName, annotation, value)
 
     pool {
       repository
         .getTraceIdsByAnnotation(annotationKey(serviceName, annotation, value), endTs, limit)
         .map { case (traceId :java.lang.Long, ts :java.lang.Long) => IndexedTraceId(traceId, timestamp = ts) }
         .toSeq
-    }
-  }
-
-  def getTracesDuration(traceIds: Seq[Long]): Future[Seq[TraceIdDuration]] = {
-    QueryGetTracesDurationStat.add(traceIds.size)
-
-    val traceIdSet = traceIds.toArray
-
-    pool {
-      val durations = (repository.getTraceDuration(true, traceIdSet)
-      .map { case (traceId :java.lang.Long, ts :java.lang.Long) =>
-        (traceId.asInstanceOf[Long], ("s", ts.asInstanceOf[Long]))}
-      .toSeq ++
-        (repository.getTraceDuration(false, traceIdSet)
-        .map { case (traceId :java.lang.Long, ts :java.lang.Long) =>
-          (traceId.asInstanceOf[Long], ("e", ts.asInstanceOf[Long]))}
-        .toSeq))
-      .groupBy { case (traceId, _) => traceId }
-      .mapValues(_.map(_._2))
-      .map { case (traceId :Long, Seq(("s", startTs :Long),("e", endTs :Long))) =>
-        (traceId, TraceIdDuration(traceId, endTs - startTs, startTs))
-      }
-
-      traceIds.map(traceId => durations.get(traceId.toInt)).flatten.toSeq
     }
   }
 }

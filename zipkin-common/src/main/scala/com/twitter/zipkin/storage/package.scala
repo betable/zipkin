@@ -15,10 +15,5 @@
  */
 package com.twitter.zipkin.storage
 
-/**
- * Duration of the trace in question in microseconds.
- */
-case class TraceIdDuration(traceId: Long, duration: Long, startTimestamp: Long)
-
 /* A trace ID and its associated timestamp */
 case class IndexedTraceId(traceId: Long, timestamp: Long)

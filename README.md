@@ -1,10 +1,10 @@
-[![Gitter chat](http://img.shields.io/badge/gitter-join%20chat%20%E2%86%92-brightgreen.svg)](https://gitter.im/openzipkin/zipkin) [![Build Status](https://travis-ci.org/openzipkin/zipkin.svg?branch=master)](https://travis-ci.org/openzipkin/zipkin)
+[![Gitter chat](http://img.shields.io/badge/gitter-join%20chat%20%E2%86%92-brightgreen.svg)](https://gitter.im/openzipkin/zipkin) [![Build Status](https://travis-ci.org/openzipkin/zipkin.svg?branch=master)](https://travis-ci.org/openzipkin/zipkin) [![Download](https://api.bintray.com/packages/openzipkin/maven/zipkin/images/download.svg) ](https://bintray.com/openzipkin/maven/zipkin/_latestVersion)
 
-![Zipkin (doc/zipkin-logo-200x119.jpg)](https://github.com/twitter/zipkin/raw/master/doc/zipkin-logo-200x119.jpg)
+![Zipkin (doc/zipkin-logo-200x119.jpg)](https://github.com/openzipkin/zipkin/raw/master/doc/zipkin-logo-200x119.jpg)
 
 [Zipkin](http://twitter.github.com/zipkin) is a distributed tracing system. It is used by Twitter to help gather timing data for all their disparate services. The front end is a "waterfall" style graph of service calls showing call durations as horizontal bars:
 
-![Screenshot](https://github.com/twitter/zipkin/raw/master/doc/web-screenshot.png)
+![Screenshot](https://github.com/openzipkin/zipkin/raw/master/doc/web-screenshot.png)
 
 ## Running Zipkin
 
@@ -12,24 +12,24 @@ Zipkin is a collection of processes (a backend for the data, a
 "collector", and query engine, and a web UI) and all of them need to
 be running to make any progress:
 
-![Architecture](https://github.com/twitter/zipkin/raw/master/doc/architecture-0.png)
+![Architecture](https://github.com/openzipkin/zipkin/raw/master/doc/architecture-0.png)
 
 If you are familiar with Docker, the
 quickest way to get started quickly is to use the
 [Docker Zipkin](https://github.com/openzipkin/docker-zipkin) project,
 which (in addition to being able to build docker images) provides
 scripts and a
-[`docker-compose.yml`](https://github.com/openzipkin/docker-zipkin/blob/master/deploy/docker-compose.yml)
+[`docker-compose.yml`](https://github.com/openzipkin/docker-zipkin/blob/master/docker-compose.yml)
 for launching pre-built images, e.g.
 
 ```
 $ git clone https://github.com/openzipkin/docker-zipkin
-$ cd docker-zipkin/deploy
+$ cd docker-zipkin
 $ docker-compose up
 ```
 
 If you are happy building from source you can use the scripts in the
-[`bin/`] directory of this repository.
+[`bin`](bin) directory of this repository.
 
 Here's how to start zipkin using the default file-based backend and view traces.
 ```bash

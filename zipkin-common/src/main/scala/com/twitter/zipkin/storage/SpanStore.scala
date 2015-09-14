@@ -15,25 +15,15 @@
  */
 package com.twitter.zipkin.storage
 
-import com.twitter.conversions.time._
+import java.nio.ByteBuffer
+
 import com.twitter.finagle.{Filter => FFilter}
 import com.twitter.util.FuturePools._
 import com.twitter.util.{Closable, Duration, Future}
 import com.twitter.zipkin.Constants
 import com.twitter.zipkin.common.Span
-import java.nio.ByteBuffer
 
 abstract class SpanStore extends java.io.Closeable {
-  /**
-   * Returns the time to live in seconds or [[Int.MaxValue]], if unknown.
-   *
-   * Corresponds to the thrift call `ZipkinQuery.getDataTimeToLive`.
-   */
-  def getDataTimeToLive(): Future[Int] = Future.value(Int.MaxValue)
-
-  def getTimeToLive(traceId: Long): Future[Duration]
-
-  def tracesExist(traceIds: Seq[Long]): Future[Set[Long]]
 
   /**
    * Get the available trace information from the storage system.
@@ -44,7 +34,6 @@ abstract class SpanStore extends java.io.Closeable {
    * the return list may not match the provided list of ids.
    */
   def getSpansByTraceIds(traceIds: Seq[Long]): Future[Seq[Seq[Span]]]
-  def getSpansByTraceId(traceId: Long): Future[Seq[Span]]
 
   /**
    * Get the trace ids for this particular service and if provided, span name.
@@ -71,12 +60,6 @@ abstract class SpanStore extends java.io.Closeable {
   ): Future[Seq[IndexedTraceId]]
 
   /**
-   * Fetch the duration or an estimate thereof from the traces.
-   * Duration returned in micro seconds.
-   */
-  def getTracesDuration(traceIds: Seq[Long]): Future[Seq[TraceIdDuration]]
-
-  /**
    * Get all the service names for as far back as the ttl allows.
    */
   def getAllServiceNames: Future[Set[String]]
@@ -90,8 +73,6 @@ abstract class SpanStore extends java.io.Closeable {
    * Store a list of spans, indexing as necessary.
    */
   def apply(spans: Seq[Span]): Future[Unit]
-
-  def setTimeToLive(traceId: Long, ttl: Duration): Future[Unit]
 
   protected def shouldIndex(span: Span): Boolean =
     !(span.isClientSide() && span.serviceNames.contains("client"))
@@ -118,7 +99,6 @@ object SpanStore {
 class InMemorySpanStore extends SpanStore {
   import scala.collection.mutable
 
-  val ttls: mutable.Map[Long, Duration] = mutable.Map.empty
   val spans: mutable.ArrayBuffer[Span] = new mutable.ArrayBuffer[Span]
 
   private[this] def call[T](f: => T): Future[T] = synchronized { Future(f) }
@@ -132,30 +112,13 @@ class InMemorySpanStore extends SpanStore {
   override def close() = {}
 
   override def apply(newSpans: Seq[Span]): Future[Unit] = call {
-    newSpans foreach { span => ttls(span.traceId) = 1.second }
     spans ++= newSpans
   }.unit
-
-  override def setTimeToLive(traceId: Long, ttl: Duration): Future[Unit] = call {
-    ttls(traceId) = ttl
-  }.unit
-
-  override def getTimeToLive(traceId: Long): Future[Duration] = call {
-    ttls(traceId)
-  }
-
-  override def tracesExist(traceIds: Seq[Long]): Future[Set[Long]] = call {
-    spans.map(_.traceId).toSet & traceIds.toSet
-  }
 
   override def getSpansByTraceIds(traceIds: Seq[Long]): Future[Seq[Seq[Span]]] = call {
     traceIds flatMap { id =>
       Some(spans.filter { _.traceId == id }.toList).filter { _.length > 0 }
     }
-  }
-
-  override def getSpansByTraceId(traceId: Long): Future[Seq[Span]] = call {
-    spans.filter { _.traceId == traceId }.toList
   }
 
   override def getTraceIdsByName(
@@ -204,19 +167,6 @@ class InMemorySpanStore extends SpanStore {
       }).filter(shouldIndex).take(limit).map { span =>
         IndexedTraceId(span.traceId, span.lastAnnotation.get.timestamp)
       }.toList
-    }
-  }
-
-  override def getTracesDuration(traceIds: Seq[Long]): Future[Seq[TraceIdDuration]] = call {
-    traceIds.flatMap { traceId =>
-      val timestamps = spans.filter { span => span.traceId == traceId }.flatMap { span =>
-        Seq(span.firstAnnotation.map { _.timestamp }, span.lastAnnotation.map { _.timestamp }).flatten
-      }
-
-      if (timestamps.isEmpty)
-        None
-      else
-        Some(TraceIdDuration(traceId, timestamps.max - timestamps.min, timestamps.min))
     }
   }
 

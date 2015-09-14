@@ -17,7 +17,7 @@
     <link rel="stylesheet" href="/app/css/traces.css">
     <link rel='stylesheet' href='/app/css/trace.css'>
     <link rel="stylesheet" href="/app/css/summary.css">
-    <link rel="stylesheet" href="/app/css/aggregate.css">
+    <link rel="stylesheet" href="/app/css/dependency.css">
   </head>
   <body>
     <div class='navbar navbar-inverse navbar-fixed-top' role='navigation'>
@@ -30,13 +30,22 @@
         <div class="navbar-left">
           <ul class="nav navbar-nav">
             <li class="active"><a href="/">Find a trace</a></li>
-            <li><a href="/aggregate">Aggregates</a></li>
+            <li><a href="/dependency">Dependencies</a></li>
           </ul>
         </div>
-        <div class="navbar-right">
-          <div class="navbar-brand">
-            <span class='muted'>{{environment}}</span>
+        <div class="navbar-right" style="width: 50%">
+          <div class="navbar-right" style='padding-left: 15px'>
+            <div class="navbar-brand">
+              <span class='muted'>{{environment}}</span>
+            </div>
           </div>
+          <form id="traceIdQueryForm" class="form-inline" role="form">
+            <div class="navbar-right" style="width: 25%; float: right">
+              <div class="row well-sm clearfix">
+                  <input type="text" class="form-control input-sm" id="traceIdQuery" name="traceIdQuery" value="{{traceIdQuery}}" style="width: 100%" placeholder='Go to trace'>
+              </div>
+            </div>
+          </form>
         </div><!--/.nav-collapse -->
       </div>
     </div>

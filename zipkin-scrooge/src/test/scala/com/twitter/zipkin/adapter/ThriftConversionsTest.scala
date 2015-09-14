@@ -16,7 +16,6 @@
  */
 package com.twitter.zipkin.adapter
 
-import com.twitter.zipkin.thriftscala.Order.EnumUnknownOrder
 import java.nio.ByteBuffer
 
 import com.twitter.conversions.time._
@@ -86,24 +85,5 @@ class ThriftConversionsTest extends FunSuite {
     val thriftTrace = expectedTrace.toThrift
     val actualTrace = thriftTrace.toTrace
     assert(expectedTrace === actualTrace)
-  }
-
-  test("convert TraceSummary") {
-    val expectedTraceSummary = TraceSummary(
-      123,
-      10000,
-      10300,
-      300,
-      List(SpanTimestamp("service1", 123, 123)),
-      List(Endpoint(123, 123, "service1")))
-
-    val thriftTraceSummary = expectedTraceSummary.toThrift
-    val actualTraceSummary = thriftTraceSummary.toTraceSummary
-    assert(expectedTraceSummary === actualTraceSummary)
-  }
-
-  test("doesn't break on unknown order") {
-    val result = thriftToOrder(new EnumUnknownOrder(999)).toOrder
-    assert(result === Order.None)
   }
 }
