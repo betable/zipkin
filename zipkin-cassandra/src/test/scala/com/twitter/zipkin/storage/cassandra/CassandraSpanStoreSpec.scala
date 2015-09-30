@@ -10,7 +10,7 @@ import org.junit.BeforeClass
 import org.twitter.zipkin.storage.cassandra.Repository
 
 object CassandraSpanStoreSpec {
-  val keyspace = "test_zipkin"
+  val keyspace = "test_zipkin_spanstore"
   // Defer shared connection to the cluster
   lazy val cluster = Cluster.builder().addContactPoint("127.0.0.1").withPort(9142).build()
 
@@ -33,7 +33,9 @@ class CassandraSpanStoreSpec extends SpanStoreSpec {
 
   import CassandraSpanStoreSpec._
 
-  override lazy val store = new CassandraSpanStore(new Repository(keyspace, cluster))
+  override val store = new CassandraSpanStore {
+    override lazy val repository = new Repository(keyspace, cluster)
+  }
 
   override def clear = cluster.connect().execute("DROP KEYSPACE IF EXISTS " + keyspace)
 }

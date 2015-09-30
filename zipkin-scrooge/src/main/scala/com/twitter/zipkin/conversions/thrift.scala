@@ -15,9 +15,6 @@
  */
 package com.twitter.zipkin.conversions
 
-import com.twitter.algebird.Moments
-import com.twitter.conversions.time._
-import com.twitter.util.Time
 import com.twitter.zipkin.common._
 import com.twitter.zipkin.query._
 import com.twitter.zipkin.thriftscala
@@ -57,7 +54,7 @@ object thrift {
   /* Annotation */
   class ThriftAnnotation(a: Annotation) {
     lazy val toThrift = {
-      thriftscala.Annotation(a.timestamp, a.value, a.host.map { _.toThrift }, a.duration.map(_.inMicroseconds.toInt))
+      thriftscala.Annotation(a.timestamp, a.value, a.host.map(_.toThrift))
     }
   }
   class WrappedAnnotation(a: thriftscala.Annotation) {
@@ -68,7 +65,7 @@ object thrift {
       if ("".equals(a.value))
         throw new IllegalArgumentException("Annotation must have a value: %s".format(a.toString))
 
-      new Annotation(a.timestamp, a.value, a.host.map { _.toEndpoint }, a.duration.map { _.microseconds })
+      new Annotation(a.timestamp, a.value, a.host.map(_.toEndpoint))
     }
   }
   implicit def annotationToThriftAnnotation(a: Annotation) = new ThriftAnnotation(a)
@@ -77,12 +74,12 @@ object thrift {
   /* BinaryAnnotation */
   class ThriftBinaryAnnotation(b: BinaryAnnotation) {
     lazy val toThrift = {
-      thriftscala.BinaryAnnotation(b.key, b.value, b.annotationType.toThrift, b.host.map { _.toThrift })
+      thriftscala.BinaryAnnotation(b.key, b.value, b.annotationType.toThrift, b.host.map(_.toThrift))
     }
   }
   class WrappedBinaryAnnotation(b: thriftscala.BinaryAnnotation) {
     lazy val toBinaryAnnotation = {
-      BinaryAnnotation(b.key, b.value, b.annotationType.toAnnotationType, b.host.map { _.toEndpoint })
+      BinaryAnnotation(b.key, b.value, b.annotationType.toAnnotationType, b.host.map(_.toEndpoint))
     }
   }
   implicit def binaryAnnotationToThriftBinaryAnnotation(b: BinaryAnnotation) = new ThriftBinaryAnnotation(b)
@@ -132,40 +129,19 @@ object thrift {
   implicit def traceToThrift(t: Trace) = new WrappedTrace(t)
   implicit def thriftToTrace(t: thriftscala.Trace) = new ThriftTrace(t)
 
-  /* Dependencies */
-  class WrappedMoments(m: Moments) {
-    lazy val toThrift = thriftscala.Moments(m.m0, m.m1, nanToNone(m.m2), nanToNone(m.m3), nanToNone(m.m4))
-    private def nanToNone(d: Double) = if (d == Double.NaN) None else Some(d)
-  }
-  class ThriftMoments(m: thriftscala.Moments) {
-    lazy val toMoments = Moments(m.m0, m.m1, m.m2.getOrElse(Double.NaN), m.m3.getOrElse(Double.NaN), m.m4.getOrElse(Double.NaN))
-  }
-  implicit def momentsToThrift(m: Moments) = new WrappedMoments(m)
-  implicit def thriftToMoments(m: thriftscala.Moments) = new ThriftMoments(m)
-
   class WrappedDependencyLink(dl: DependencyLink) {
-    lazy val toThrift = {
-      thriftscala.DependencyLink(dl.parent.name, dl.child.name, dl.durationMoments.toThrift)
-    }
+    lazy val toThrift = thriftscala.DependencyLink(dl.parent, dl.child, dl.callCount)
   }
   class ThriftDependencyLink(dl: thriftscala.DependencyLink) {
-    lazy val toDependencyLink = DependencyLink(
-      Service(dl.parent),
-      Service(dl.child),
-      dl.durationMoments.toMoments
-    )
+    lazy val toDependencyLink = DependencyLink(dl.parent, dl.child, dl.callCount)
   }
   implicit def dependencyLinkToThrift(dl: DependencyLink) = new WrappedDependencyLink(dl)
   implicit def thriftToDependencyLink(dl: thriftscala.DependencyLink) = new ThriftDependencyLink(dl)
   class WrappedDependencies(d: Dependencies) {
-    lazy val toThrift = thriftscala.Dependencies(d.startTime.inMicroseconds, d.endTime.inMicroseconds, d.links.map {_.toThrift}.toSeq )
+    lazy val toThrift = thriftscala.Dependencies(d.startTime, d.endTime, d.links.map(_.toThrift))
   }
   class ThriftDependencies(d: thriftscala.Dependencies) {
-    lazy val toDependencies = Dependencies(
-      Time.fromMicroseconds(d.startTime),
-      Time.fromMicroseconds(d.endTime),
-      d.links.map {_.toDependencyLink}
-    )
+    lazy val toDependencies = Dependencies(d.startTime, d.endTime, d.links.map(_.toDependencyLink))
   }
   implicit def dependenciesToThrift(d: Dependencies) = new WrappedDependencies(d)
   implicit def thriftToDependencies(d: thriftscala.Dependencies) = new ThriftDependencies(d)

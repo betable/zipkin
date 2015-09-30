@@ -15,37 +15,18 @@ namespace java com.twitter.zipkin.thriftjava
 #@namespace scala com.twitter.zipkin.thriftscala
 namespace rb Zipkin
 
-/**
- * Moments is defined as below per algebird's MomentsGroup.scala
- *
- * A class to calculate the first five central moments over a sequence of Doubles.
- * Given the first five central moments, we can then calculate metrics like skewness
- * and kurtosis.
- *
- * m{i} denotes the ith central moment.
- */
-struct Moments {
-  /** count */
-  1: i64 m0
-  /** mean */
-  2: double m1
-  /** population variance = m2 / count, when count > 1 */
-  3: optional double m2
-  /** skewness = math.sqrt(count) * m3 / math.pow(m2, 1.5), when count > 2 */
-  4: optional double m3
-  /** kurtosis = count * m4 / math.pow(m2, 2) - 3, when count > 3 */
-  5: optional double m4
-}
-
 struct DependencyLink {
   /** parent service name (caller) */
   1: string parent
   /** child service name (callee) */
   2: string child
-  3: Moments duration_moments
+  # 3: Moments OBSOLETE_duration_moments
+  /** calls made during the duration (in microseconds) of this link */
+  4: i64 callCount
   # histogram?
 }
 
+/* An aggregate representation of services paired with every service they call. */
 struct Dependencies {
   /** microseconds from epoch */
   1: i64 start_time
@@ -58,18 +39,21 @@ exception DependenciesException {
   1: string msg
 }
 
-service DependencySink {
+service DependencyStore {
 
-    void storeDependencies(1: Dependencies dependencies) throws (1: DependenciesException e);
-}
-
-service DependencySource {
+    void storeDependencies(
+      /** replaces the links defined for the given interval */
+      1: Dependencies dependencies
+    ) throws (1: DependenciesException e);
 
     /**
-     * Get an aggregate representation of all services paired with every service they call in to.
-     * This includes information on call counts and mean/stdDev/etc of call durations.  The two arguments
-     * specify epoch time in microseconds. The end time is optional and defaults to one day after the
-     * start time.
+     * Returns dependency links in an interval contained by start_time and end_time,
+     * or Dependencies(0, 0, empty), when none are present.
      */
-    Dependencies getDependencies(1: optional i64 start_time, 2: optional i64 end_time) throws (1: DependenciesException qe);
+    Dependencies getDependencies(
+      /* microseconds from epoch, defaults to one day before end_time */
+      1: optional i64 start_time,
+      /* microseconds from epoch, defaults to now */
+      2: optional i64 end_time
+    ) throws (1: DependenciesException qe);
 }

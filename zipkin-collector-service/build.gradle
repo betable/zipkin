@@ -15,19 +15,18 @@ jar.manifest.attributes 'Main-Class': mainClassName
 tasks.build.dependsOn(shadowJar)
 artifacts.zipkinUpload shadowJar
 
-repositories {
-    // For dependencies of zipkin-cassandra
-    maven { url 'http://conjars.org/repo' }
-}
-
 dependencies {
+    compile "com.twitter:finagle-ostrich4_${scalaInterfaceVersion}:${commonVersions.finagle}"
+    compile "com.twitter:finagle-thriftmux_${scalaInterfaceVersion}:${commonVersions.finagle}"
+    compile "ch.qos.logback:logback-core:${commonVersions.logback}"
+    compile "ch.qos.logback:logback-classic:${commonVersions.logback}"
+
     compile project(':zipkin-receiver-kafka')
     compile project(':zipkin-receiver-scribe')
     compile project(':zipkin-cassandra')
     compile project(':zipkin-redis')
     compile project(':zipkin-anormdb')
     compile anormDriverDependencies["mysql"] // for query-mysql
-    compile "org.slf4j:slf4j-simple:" + commonVersions.slf4j
 }
 
 sourceSets.main.resources.srcDirs += ['config']

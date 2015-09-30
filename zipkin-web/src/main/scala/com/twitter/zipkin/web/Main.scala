@@ -15,18 +15,21 @@
  */
 package com.twitter.zipkin.web
 
+import ch.qos.logback.classic.{Logger, Level}
 import com.twitter.app.App
+import com.twitter.finagle._
 import com.twitter.finagle.httpx.{HttpMuxer, Request, Response}
 import com.twitter.finagle.stats.{DefaultStatsReceiver, StatsReceiver}
-import com.twitter.finagle.tracing.{NullTracer, DefaultTracer}
+import com.twitter.finagle.tracing.{DefaultTracer, NullTracer}
 import com.twitter.finagle.zipkin.thrift.RawZipkinTracer
-import com.twitter.finagle._
+import com.twitter.finatra.httpclient.HttpClient
+import com.twitter.finatra.json.FinatraObjectMapper
 import com.twitter.server.TwitterServer
-import com.twitter.util.{Await, Future}
-import com.twitter.zipkin.common.json.ZipkinJson
-import com.twitter.zipkin.common.mustache.ZipkinMustache
-import com.twitter.zipkin.thriftscala.{DependencySource, ZipkinQuery}
+import com.twitter.util.Await
+import com.twitter.zipkin.json.ZipkinJson
+import com.twitter.zipkin.web.mustache.ZipkinMustache
 import java.net.InetSocketAddress
+import org.slf4j.LoggerFactory
 
 trait ZipkinWebFactory { self: App =>
   private[this] val resourceDirs = Set(
@@ -57,6 +60,10 @@ trait ZipkinWebFactory { self: App =>
   val queryLimit = flag("zipkin.web.query.limit", 10, "Default query limit for trace results")
   val environment = flag("zipkin.web.environmentName", "", "The name of the environment Zipkin is running in")
 
+  val logLevel = sys.env.get("WEB_LOG_LEVEL").getOrElse("INFO")
+  LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME)
+    .asInstanceOf[Logger].setLevel(Level.toLevel(logLevel))
+
   // If a scribe host is configured, send all traces to it, otherwise disable tracing
   val scribeHost = sys.env.get("SCRIBE_HOST")
   val scribePort = sys.env.get("SCRIBE_PORT")
@@ -66,22 +73,19 @@ trait ZipkinWebFactory { self: App =>
     NullTracer
   }
 
-  // Don't use ThriftMux as it will make zipkin-web incompatible with non-finagle thrift servers.
-  def newQueryClient() = Thrift.client
-                               .configured(param.Label("zipkin-query"))
-                               .newIface[ZipkinQuery.FutureIface](queryDest())
-  def newDependencySource() = Thrift.client
-                                    .configured(param.Label("zipkin-query"))
-                                    .newIface[DependencySource.FutureIface](queryDest())
+  /** Initialize a json-aware Finatra client, targeting the query host */
+  def newQueryClient() = new HttpClient(
+    httpService =
+      Httpx.client.configured(param.Label("zipkin-query")).newClient(queryDest()).toService,
+    mapper = new FinatraObjectMapper(ZipkinJson)
+  )
 
-  def newJsonGenerator = new ZipkinJson
   def newMustacheGenerator = new ZipkinMustache(webResourcesRoot(), webCacheResources())
   def newQueryExtractor = new QueryExtractor(queryLimit())
-  def newHandlers = new Handlers(newJsonGenerator, newMustacheGenerator, newQueryExtractor)
+  def newHandlers = new Handlers(newMustacheGenerator, newQueryExtractor)
 
   def newWebServer(
-    queryClient: ZipkinQuery[Future] = newQueryClient(),
-    dependencySource: DependencySource[Future] = newDependencySource(),
+    queryClient: HttpClient = newQueryClient(),
     stats: StatsReceiver = DefaultStatsReceiver.scope("zipkin-web")
   ): Service[Request, Response] = {
     val handlers = newHandlers
@@ -93,14 +97,9 @@ trait ZipkinWebFactory { self: App =>
       ("/public/", handlePublic(resourceDirs, typesMap, publicRoot)),
       ("/", addLayout("Index", environment()) andThen handleIndex(queryClient)),
       ("/traces/:id", addLayout("Traces", environment()) andThen handleTraces(queryClient)),
-      ("/dependency", addLayout("Dependency", environment()) andThen handleDependency(queryClient)),
-      ("/api/query", handleQuery(queryClient)),
-      ("/api/services", handleServices(queryClient)),
-      ("/api/spans", requireServiceName andThen handleSpans(queryClient)),
-      ("/api/dependencies", handleDependencies(dependencySource)),
-      ("/api/dependencies/?:startTime/?:endTime", handleDependencies(dependencySource)),
-      ("/api/get/:id", handleGetTrace(queryClient)),
-      ("/api/trace/:id", handleGetTrace(queryClient))
+      ("/dependency", addLayout("Dependency", environment()) andThen handleDependency()),
+      ("/api/spans", handleRoute(queryClient, "/api/v1/spans")),
+      ("/api/dependencies/?:startTime/?:endTime", handleRoute(queryClient, "/api/v1/dependencies"))
     ).foldLeft(new HttpMuxer) { case (m , (p, handler)) =>
       val path = p.split("/").toList
       val handlePath = path.takeWhile { t => !(t.startsWith(":") || t.startsWith("?:")) }

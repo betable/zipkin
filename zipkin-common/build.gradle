@@ -1,12 +1,13 @@
 dependencies {
-    compile "com.twitter:util-core_${scalaInterfaceVersion}:${commonVersions.twitterUtil}"
-    compile "com.twitter:algebird-core_${scalaInterfaceVersion}:${commonVersions.algebird}"
-    compile "com.twitter:ostrich_${scalaInterfaceVersion}:${commonVersions.ostrich}"
+    compile "com.google.guava:guava:${commonVersions.guava}"
 
-    compile "com.twitter:finagle-ostrich4_${scalaInterfaceVersion}:${commonVersions.finagle}"
-    compile "com.twitter:finagle-thrift_${scalaInterfaceVersion}:${commonVersions.finagle}"
-    compile "com.twitter:finagle-zipkin_${scalaInterfaceVersion}:${commonVersions.finagle}"
-    compile "com.twitter:finagle-exception_${scalaInterfaceVersion}:${commonVersions.finagle}"
+    // for com.twitter.util.Future
+    compile "com.twitter:util-core_${scalaInterfaceVersion}:${commonVersions.twitterUtil}"
+
+    // for ZipkinJson
+    compile "com.fasterxml.jackson.core:jackson-annotations:${commonVersions.jackson}"
+    compile "com.fasterxml.jackson.datatype:jackson-datatype-joda:${commonVersions.jackson}"
+    compile "com.fasterxml.jackson.module:jackson-module-scala_${scalaInterfaceVersion}:${commonVersions.jackson}"
 }
 
 task testJar(type: Jar) {

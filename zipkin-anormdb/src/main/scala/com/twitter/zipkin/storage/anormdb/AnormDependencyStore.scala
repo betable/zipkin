@@ -16,15 +16,15 @@
 
 package com.twitter.zipkin.storage.anormdb
 
+import com.twitter.finagle.stats.{DefaultStatsReceiver, StatsReceiver}
 import com.twitter.util.{Future, Time}
-import com.twitter.conversions.time._
-import com.twitter.zipkin.common.{Service, DependencyLink, Dependencies}
+import com.twitter.zipkin.common.{Dependencies, DependencyLink}
 import com.twitter.zipkin.storage.DependencyStore
+import com.twitter.zipkin.storage.anormdb.AnormThreads.inNewThread
 import java.sql.Connection
-import anorm._
 import anorm.SqlParser._
-import com.twitter.algebird.Moments
-import AnormThreads.inNewThread
+import anorm._
+import java.util.concurrent.TimeUnit._
 
 /**
  * Retrieve and store aggregate dependency information.
@@ -32,42 +32,49 @@ import AnormThreads.inNewThread
  * The top annotations methods are stubbed because they're not currently
  * used anywhere; that feature was never completed.
  */
-case class AnormDependencyStore(
-  val db: DB,
-  val openCon: Option[Connection] = None) extends DependencyStore with DBPool {
+case class AnormDependencyStore(val db: DB,
+                                val openCon: Option[Connection] = None,
+                                val stats: StatsReceiver = DefaultStatsReceiver.scope("AnormDependencyStore")
+                                 ) extends DependencyStore with DBPool {
 
-  /**
-   * Get the dependencies in a time range.
-   *
-   * endDate is optional and if not passed defaults to startDate plus one day.
-   */
-  def getDependencies(startDate: Option[Time], endDate: Option[Time]=None): Future[Dependencies] = db.inNewThreadWithRecoverableRetry {
-    val startMs = startDate.getOrElse(Time.now - 1.day).inMicroseconds
-    val endMs = endDate.getOrElse(Time.now).inMicroseconds
+
+  case class DependencyInterval(startMicros: Long, endMicros: Long, startId: Long, endId: Long)
+
+  override def getDependencies(startTime: Option[Long], endTime: Option[Long] = None): Future[Dependencies] = db.inNewThreadWithRecoverableRetry {
+    val endTs = endTime.getOrElse(Time.now.inMicroseconds)
+    val startTs = startTime.getOrElse(endTs - MICROSECONDS.convert(1, DAYS))
 
 	implicit val (conn, borrowTime) = borrowConn()
 	try {
 
-    val links: List[DependencyLink] = SQL(
-      """SELECT parent, child, m0, m1, m2, m3, m4
-        |FROM zipkin_dependency_links AS l
-        |LEFT JOIN zipkin_dependencies AS d
-        |  ON l.dlid = d.dlid
+    SQL(
+      """SELECT min(start_ts), max(end_ts), min(dlid), max(dlid)
+        |FROM zipkin_dependencies
         |WHERE start_ts >= {startTs}
         |  AND end_ts <= {endTs}
-        |ORDER BY l.dlid DESC
       """.stripMargin)
-    .on("startTs" -> startMs)
-    .on("endTs" -> endMs)
-    .as((str("parent") ~ str("child") ~ long("m0") ~ get[Double]("m1") ~ get[Double]("m2") ~ get[Double]("m3") ~ get[Double]("m4") map {
-      case parent ~ child ~ m0 ~ m1 ~ m2 ~ m3 ~ m4 => new DependencyLink(
-        new Service(parent),
-        new Service(child),
-        new Moments(m0, m1, m2, m3, m4)
-      )
-    }) *)
+      .on("startTs" -> startTs)
+      .on("endTs" -> endTs)
+      .as((long("min(start_ts)").? ~ long("max(end_ts)").? ~ long("min(dlid)").? ~ long("max(dlid)").? map {
+      case startMicros ~ endMicros ~ startId ~ endId => {
+        startMicros.map(DependencyInterval(_, endMicros.get, startId.get, endId.get))
+      }
+    }) *).flatMap(_.headOption).headOption.map(interval => {
 
-    new Dependencies(Time.fromMicroseconds(startMs), Time.fromMicroseconds(endMs), links)
+      val links: List[DependencyLink] = SQL(
+        """SELECT parent, child, call_count
+          |FROM zipkin_dependency_links
+          |WHERE dlid >= {startId}
+          |  AND dlid <= {endId}
+          |ORDER BY dlid DESC
+        """.stripMargin)
+        .on("startId" -> interval.startId)
+        .on("endId" -> interval.endId)
+        .as((str("parent") ~ str("child") ~ long("call_count") map {
+        case parent ~ child ~ callCount => new DependencyLink(parent,child, callCount)
+      }) *)
+      Dependencies(interval.startMicros, interval.endMicros, links)
+    }).getOrElse(Dependencies.zero)
 
     } finally {
       returnConn(conn, borrowTime, "getDependencies")
@@ -79,7 +86,7 @@ case class AnormDependencyStore(
    *
    * Synchronize these so we don't do concurrent writes from the same box
    */
-  def storeDependencies(dependencies: Dependencies): Future[Unit] = inNewThread {
+  override def storeDependencies(dependencies: Dependencies): Future[Unit] = inNewThread {
 	implicit val (conn, borrowTime) = borrowConn()
 	try {
 
@@ -88,23 +95,19 @@ case class AnormDependencyStore(
             |  (start_ts, end_ts)
             |VALUES ({startTs}, {endTs})
           """.stripMargin)
-        .on("startTs" -> dependencies.startTime.inMicroseconds)
-        .on("endTs" -> dependencies.endTime.inMicroseconds)
+        .on("startTs" -> dependencies.startTime)
+        .on("endTs" -> dependencies.endTime)
       .executeInsert()
 
       dependencies.links.foreach { link =>
         SQL("""INSERT INTO zipkin_dependency_links
-              |  (dlid, parent, child, m0, m1, m2, m3, m4)
-              |VALUES ({dlid}, {parent}, {child}, {m0}, {m1}, {m2}, {m3}, {m4})
+              |  (dlid, parent, child, call_count)
+              |VALUES ({dlid}, {parent}, {child}, {callCount})
             """.stripMargin)
           .on("dlid" -> dlid)
-          .on("parent" -> link.parent.name)
-          .on("child" -> link.child.name)
-          .on("m0" -> link.durationMoments.m0)
-          .on("m1" -> link.durationMoments.m1)
-          .on("m2" -> link.durationMoments.m2)
-          .on("m3" -> link.durationMoments.m3)
-          .on("m4" -> link.durationMoments.m4)
+          .on("parent" -> link.parent)
+          .on("child" -> link.child)
+          .on("callCount" -> link.callCount)
         .execute()
       }
     })

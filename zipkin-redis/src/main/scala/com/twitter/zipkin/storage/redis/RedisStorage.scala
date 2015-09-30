@@ -24,7 +24,6 @@ class RedisStorage(
   }
 ) extends Closeable with ExpirationSupport {
 
-
   var snappyCodec = new RedisSnappyThriftCodec[thriftscala.Span](serializer)
   private def encodeTraceId(traceId: Long) = copiedBuffer("full_span:" + traceId, UTF_8)
 
@@ -39,16 +38,14 @@ class RedisStorage(
 
   def getSpansByTraceIds(traceIds: Seq[Long]): Future[Seq[Seq[Span]]] =
     Future.collect(traceIds.map(getSpansByTraceId))
-      .map(_.filter(spans => spans.size > 0)) // prune empties
+      .map(_.filterNot(_.isEmpty)) // prune empties
+      .map(_.sortBy(_.head)) // sort traces by the first span
 
   private[this] def getSpansByTraceId(traceId: Long): Future[Seq[Span]] =
     client.lRange(encodeTraceId(traceId), 0L, -1L) map
-      (_.map(decodeSpan).sortBy(timestampOfFirstAnnotation)(Ordering.Long.reverse))
+      (_.map(decodeSpan).sorted)
 
   private def decodeSpan(buf: ChannelBuffer): Span = {
     new WrappedSpan(snappyCodec.decode(buf)).toSpan
   }
-
-  private def timestampOfFirstAnnotation(span: Span) =
-    span.firstAnnotation.map(a => a.timestamp).getOrElse(0L)
 }

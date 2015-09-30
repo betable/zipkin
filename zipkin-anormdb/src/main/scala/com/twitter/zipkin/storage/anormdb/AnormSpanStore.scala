@@ -17,26 +17,25 @@ package com.twitter.zipkin.storage.anormdb
 
 import anorm.SqlParser._
 import anorm._
+import com.twitter.finagle.stats.{DefaultStatsReceiver, StatsReceiver}
 import com.twitter.util._
 import com.twitter.zipkin.Constants
 import com.twitter.zipkin.common._
 import com.twitter.zipkin.storage.anormdb.AnormThreads._
+import com.twitter.zipkin.storage.anormdb.DB.byteArrayToStatement
 import com.twitter.zipkin.storage.{IndexedTraceId, SpanStore}
 import com.twitter.zipkin.util.Util
 import java.nio.ByteBuffer
 import java.sql.Connection
-import com.twitter.zipkin.storage.anormdb.DB.byteArrayToStatement
 
-class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends SpanStore with DBPool {
+class AnormSpanStore(val db: DB,
+                     val openCon: Option[Connection] = None,
+                     val stats: StatsReceiver = DefaultStatsReceiver.scope("AnormSpanStore")
+                      ) extends SpanStore with DBPool {
 
   override def apply(spans: Seq[Span]) = Future.join(spans.map(storeSpan))
 
   private [this] def storeSpan(span: Span): Future[Unit] = inNewThread {
-    val createdTs: Option[Long] = span.firstAnnotation match {
-      case Some(anno) => Some(anno.timestamp)
-      case None => None
-    }
-
     implicit val (conn, borrowTime) = borrowConn()
     try {
 
@@ -44,27 +43,26 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
         SQL(
           db.getSpanInsertCommand() +
             """ INTO zipkin_spans
-              |  (span_id, parent_id, trace_id, span_name, debug, duration, created_ts)
+              |  (span_id, parent_id, trace_id, span_name, debug, created_ts)
               |VALUES
-              |  ({span_id}, {parent_id}, {trace_id}, {span_name}, {debug}, {duration}, {created_ts})
+              |  ({span_id}, {parent_id}, {trace_id}, {span_name}, {debug}, {created_ts})
             """.stripMargin)
           .on("span_id" -> span.id)
           .on("parent_id" -> span.parentId)
           .on("trace_id" -> span.traceId)
           .on("span_name" -> span.name)
           .on("debug" -> (if (span.debug) 1 else 0))
-          .on("duration" -> span.duration)
-          .on("created_ts" -> createdTs)
+          .on("created_ts" -> span.firstTimestamp)
           .execute()
 
         span.annotations.foreach(a =>
           SQL(
             """INSERT INTO zipkin_annotations
               |  (span_id, trace_id, span_name, service_name, value, ipv4, port,
-              |    a_timestamp, duration)
+              |    a_timestamp)
               |VALUES
               |  ({span_id}, {trace_id}, {span_name}, {service_name}, {value},
-              |    {ipv4}, {port}, {timestamp}, {duration})
+              |    {ipv4}, {port}, {timestamp})
             """.stripMargin)
             .on("span_id" -> span.id)
             .on("trace_id" -> span.traceId)
@@ -74,7 +72,6 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
             .on("ipv4" -> a.host.map(_.ipv4))
             .on("port" -> a.host.map(_.port))
             .on("timestamp" -> a.timestamp)
-            .on("duration" -> a.duration.map(_.inNanoseconds))
             .execute()
         )
 
@@ -96,7 +93,7 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
             .on("annotation_type_value" -> b.annotationType.value)
             .on("ipv4" -> b.host.map(_.ipv4))
             .on("port" -> b.host.map(_.port))
-            .on("annotation_ts" -> createdTs)
+            .on("annotation_ts" -> span.firstTimestamp)
             .execute()
         )
       })
@@ -113,9 +110,10 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
       val traceIdsString:String = traceIds.mkString(",")
       val spans:List[DBSpan] =
         SQL(
-          """SELECT span_id, parent_id, trace_id, span_name, debug
+          """SELECT DISTINCT span_id, parent_id, trace_id, span_name, debug
             |FROM zipkin_spans
             |WHERE trace_id IN (%s)
+            |ORDER BY created_ts
           """.stripMargin.format(traceIdsString))
           .as((long("span_id") ~ get[Option[Long]]("parent_id") ~
           long("trace_id") ~ str("span_name") ~ int("debug") map {
@@ -123,18 +121,19 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
         }) *)
       val annos:List[DBAnnotation] =
         SQL(
-          """SELECT span_id, trace_id, span_name, service_name, value, ipv4, port, a_timestamp, duration
+          """SELECT DISTINCT span_id, trace_id, span_name, service_name, value, ipv4, port, a_timestamp
             |FROM zipkin_annotations
             |WHERE trace_id IN (%s)
+            |ORDER BY a_timestamp
           """.stripMargin.format(traceIdsString))
           .as((long("span_id") ~ long("trace_id") ~ str("span_name") ~ str("service_name") ~ str("value") ~
           get[Option[Int]]("ipv4") ~ get[Option[Int]]("port") ~
-          long("a_timestamp") ~ get[Option[Long]]("duration") map {
-          case a~b~c~d~e~f~g~h~i => DBAnnotation(a, b, c, d, e, f, g, h, i)
+          long("a_timestamp") map {
+          case a~b~c~d~e~f~g~h => DBAnnotation(a, b, c, d, e, f, g, h)
         }) *)
       val binAnnos:List[DBBinaryAnnotation] =
         SQL(
-          """SELECT span_id, trace_id, span_name, service_name, annotation_key,
+          """SELECT DISTINCT span_id, trace_id, span_name, service_name, annotation_key,
             |  annotation_value, annotation_type_value, ipv4, port
             |FROM zipkin_binary_annotations
             |WHERE trace_id IN (%s)
@@ -146,8 +145,7 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
           case a~b~c~d~e~f~g~h~i => DBBinaryAnnotation(a, b, c, d, e, f, g, h, i)
         }) *)
 
-      val results: Seq[Seq[Span]] = traceIds.map { traceId =>
-        spans.filter(_.traceId == traceId).map { span =>
+      val results = spans.map{ span => {
           val spanAnnos = annos.filter { a =>
             a.traceId == span.traceId && a.spanId == span.spanId && a.spanName == span.spanName
           }
@@ -156,11 +154,7 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
               case (Some(ipv4), Some(port)) => Some(Endpoint(ipv4, port.toShort, anno.serviceName))
               case _ => None
             }
-            val duration:Option[Duration] = anno.duration match {
-              case Some(nanos) => Some(Duration.fromNanoseconds(nanos))
-              case None => None
-            }
-            Annotation(anno.timestamp, anno.value, host, duration)
+            Annotation(anno.timestamp, anno.value, host)
           }
           val spanBinAnnos = binAnnos.filter { a =>
             a.traceId == span.traceId && a.spanId == span.spanId && a.spanName == span.spanName
@@ -174,11 +168,11 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
             val annotationType = AnnotationType.fromInt(binAnno.annotationTypeValue)
             BinaryAnnotation(binAnno.key, value, annotationType, host)
           }
-          Span(traceId, span.spanName, span.spanId, span.parentId, spanAnnos, spanBinAnnos, span.debug)
+          Span(span.traceId, span.spanName, span.spanId, span.parentId, spanAnnos, spanBinAnnos, span.debug)
         }
       }
-      results.filter(!_.isEmpty)
-
+      // Redundant sort as List.groupBy loses order of values
+      results.groupBy(_.traceId).values.toList.sortBy(_.head) // sort traces by the first span
     } finally {
       returnConn(conn, borrowTime, "getSpansByTraceIds")
     }
@@ -202,11 +196,11 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
             |  WHERE service_name = {service_name}
             |    AND (span_name = {span_name} OR {span_name} = '')
             |    AND a_timestamp < {end_ts}
-            |  ORDER BY a_timestamp DESC
+            |  ORDER BY a_timestamp
             |  LIMIT {limit})
             |AS t2 ON t1.trace_id = t2.trace_id
             |GROUP BY t1.trace_id
-            |ORDER BY t1.a_timestamp DESC
+            |ORDER BY t1.a_timestamp
           """.stripMargin)
           .on("service_name" -> serviceName)
           .on("span_name" -> (if (spanName.isEmpty) "" else spanName.get))
@@ -245,11 +239,11 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
               |    AND annotation_value = {value}
               |    AND annotation_ts < {end_ts}
               |    AND annotation_ts IS NOT NULL
-              |  ORDER BY annotation_ts DESC
+              |  ORDER BY annotation_ts
               |  LIMIT {limit})
               |AS t2 ON t1.trace_id = t2.trace_id
               |GROUP BY t1.trace_id
-              |ORDER BY t1.created_ts DESC
+              |ORDER BY t1.created_ts
             """.stripMargin)
               .on("service_name" -> serviceName)
               .on("annotation" -> annotation)
@@ -267,7 +261,7 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
                 |  AND value = {annotation}
                 |  AND a_timestamp < {end_ts}
                 |GROUP BY trace_id
-                |ORDER BY a_timestamp DESC
+                |ORDER BY a_timestamp
                 |LIMIT {limit}
               """.stripMargin)
               .on("service_name" -> serviceName)
@@ -295,7 +289,7 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
         """SELECT DISTINCT service_name
           |FROM zipkin_annotations
           |GROUP BY service_name
-          |ORDER BY service_name ASC
+          |ORDER BY service_name
         """.stripMargin)
         .as(str("service_name") *).toSet
 
@@ -313,7 +307,7 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
           |FROM zipkin_annotations
           |WHERE service_name = {service} AND span_name <> ''
           |GROUP BY span_name
-          |ORDER BY span_name ASC
+          |ORDER BY span_name
         """.stripMargin)
         .on("service" -> service)
         .as(str("span_name") *)
@@ -325,6 +319,6 @@ class AnormSpanStore(val db: DB, val openCon: Option[Connection] = None) extends
   }
 
   case class DBSpan(spanId: Long, parentId: Option[Long], traceId: Long, spanName: String, debug: Boolean)
-  case class DBAnnotation(spanId: Long, traceId: Long, spanName: String, serviceName: String, value: String, ipv4: Option[Int], port: Option[Int], timestamp: Long, duration: Option[Long])
+  case class DBAnnotation(spanId: Long, traceId: Long, spanName: String, serviceName: String, value: String, ipv4: Option[Int], port: Option[Int], timestamp: Long)
   case class DBBinaryAnnotation(spanId: Long, traceId: Long, spanName: String, serviceName: String, key: String, value: Array[Byte], annotationTypeValue: Int, ipv4: Option[Int], port: Option[Int])
 }

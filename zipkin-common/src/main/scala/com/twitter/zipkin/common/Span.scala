@@ -46,7 +46,7 @@ object Span {
     def name = _name
     def id = _id
     def parentId = _parentId
-    def annotations = _annotations
+    def annotations = _annotations.sorted
     def binaryAnnotations = _binaryAnnotations
     def debug = _debug
   }
@@ -65,14 +65,6 @@ object Span {
     } catch {
       case NonFatal(_) => None
     }
-
-  /**
-   * Order annotations by timestamp.
-   */
-  val timestampOrdering = new Ordering[Annotation] {
-    def compare(a: Annotation, b: Annotation) = a.timestamp.compare(b.timestamp)
-  }
-
 }
 
 /**
@@ -81,12 +73,12 @@ object Span {
  * @param id random long that identifies this span
  * @param parentId reference to the parent span in the trace tree
  * @param annotations annotations, containing a timestamp and some value. both user generated and
- * some fixed ones from the tracing framework
+ * some fixed ones from the tracing framework. Sorted ascending by timestamp
  * @param binaryAnnotations  binary annotations, can contain more detailed information such as
- * serialized objects
+ * serialized objects. Sorted ascending by timestamp. Sorted ascending by timestamp
  * @param debug if this is set we will make sure this span is stored, no matter what the samplers want
  */
-trait Span { self =>
+trait Span extends Ordered[Span] { self =>
   def traceId: Long
   def name: String
   def id: Long
@@ -94,6 +86,10 @@ trait Span { self =>
   def annotations: List[Annotation]
   def binaryAnnotations: Seq[BinaryAnnotation]
   def debug: Boolean
+
+  // TODO: cache first timestamp when this is a normal case class as opposed to a trait
+  override def compare(that: Span) =
+    java.lang.Long.compare(firstTimestamp.getOrElse(0L), that.firstTimestamp.getOrElse(0L))
 
   def copy(
     traceId: Long = self.traceId,
@@ -162,7 +158,7 @@ trait Span { self =>
       def name = selectedName
       def id = self.id
       def parentId = self.parentId
-      def annotations = self.annotations ++ mergeFrom.annotations
+      def annotations = (self.annotations ++ mergeFrom.annotations).sorted
       def binaryAnnotations = self.binaryAnnotations ++ mergeFrom.binaryAnnotations
       def debug = self.debug | mergeFrom.debug
     }
@@ -171,24 +167,12 @@ trait Span { self =>
   /**
    * Get the first annotation by timestamp.
    */
-  def firstAnnotation: Option[Annotation] = {
-    try {
-      Some(annotations.min(Span.timestampOrdering))
-    } catch {
-      case e: UnsupportedOperationException => None
-    }
-  }
+  def firstAnnotation: Option[Annotation] = annotations.headOption
 
   /**
    * Get the last annotation by timestamp.
    */
-  def lastAnnotation: Option[Annotation] = {
-    try {
-      Some(annotations.max(Span.timestampOrdering))
-    } catch {
-      case e: UnsupportedOperationException => None
-    }
-  }
+  def lastAnnotation: Option[Annotation] = annotations.lastOption
 
   /**
    * Endpoints involved in this span
@@ -201,14 +185,6 @@ trait Span { self =>
    */
   def clientSideEndpoint: Option[Endpoint] =
     clientSideAnnotations.map(_.host).flatten.headOption
-
-  /**
-   * Assuming this is an RPC span, is it from the client side?
-   */
-  def isClientSide(): Boolean =
-    annotations.exists(a => {
-      a.value.equals(Constants.ClientSend) || a.value.equals(Constants.ClientRecv)
-    })
 
   /**
    * Pick out the core client side annotations

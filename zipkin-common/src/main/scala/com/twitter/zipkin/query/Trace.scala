@@ -15,8 +15,6 @@
  */
 package com.twitter.zipkin.query
 
-import com.twitter.finagle.tracing.{Trace => FTrace}
-import com.twitter.logging.Logger
 import com.twitter.zipkin.common.{BinaryAnnotation, Endpoint, Span}
 import java.nio.ByteBuffer
 import scala.collection.mutable
@@ -35,12 +33,7 @@ object Trace {
 
 case class Trace(private val s: Seq[Span]) {
 
-  lazy val spans = mergeBySpanId(s).toSeq.sortWith {
-    (a, b) =>
-      val aTimestamp = a.firstAnnotation.map(_.timestamp).getOrElse(Long.MaxValue)
-      val bTimestamp = b.firstAnnotation.map(_.timestamp).getOrElse(Long.MaxValue)
-      aTimestamp < bTimestamp
-  }
+  lazy val spans = mergeBySpanId(s).toList.sorted
 
   /**
    * Find the trace id for this trace.
@@ -133,7 +126,6 @@ case class Trace(private val s: Seq[Span]) {
    * @return span id -> depth in the tree
    */
   def toSpanDepths: Option[Map[Long, Int]] = {
-    FTrace.record("toSpanDepths")
     getRootMostSpan match {
       case None => return None
       case Some(s) => {

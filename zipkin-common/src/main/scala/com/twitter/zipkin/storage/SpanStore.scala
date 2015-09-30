@@ -17,9 +17,8 @@ package com.twitter.zipkin.storage
 
 import java.nio.ByteBuffer
 
-import com.twitter.finagle.{Filter => FFilter}
 import com.twitter.util.FuturePools._
-import com.twitter.util.{Closable, Duration, Future}
+import com.twitter.util.{Closable, Future}
 import com.twitter.zipkin.Constants
 import com.twitter.zipkin.common.Span
 
@@ -30,14 +29,16 @@ abstract class SpanStore extends java.io.Closeable {
    * Spans in trace should be sorted by the first annotation timestamp
    * in that span. First event should be first in the spans list.
    *
-   * The return list will contain only spans that have been found, thus
-   * the return list may not match the provided list of ids.
+   * <p/> Results are sorted in order of the first span's timestamp, and contain
+   * less elements than trace IDs when corresponding traces aren't available.
    */
   def getSpansByTraceIds(traceIds: Seq[Long]): Future[Seq[Seq[Span]]]
 
   /**
    * Get the trace ids for this particular service and if provided, span name.
    * Only return maximum of limit trace ids from before the endTs.
+   *
+   * <p/> Results are sorted in order of the first span's timestamp
    */
   def getTraceIdsByName(
     serviceName: String,
@@ -61,11 +62,15 @@ abstract class SpanStore extends java.io.Closeable {
 
   /**
    * Get all the service names for as far back as the ttl allows.
+   *
+   * <p/> Results are sorted lexicographically
    */
   def getAllServiceNames: Future[Set[String]]
 
   /**
    * Get all the span names for a particular service, as far back as the ttl allows.
+   *
+   * <p/> Results are sorted lexicographically
    */
   def getSpanNames(service: String): Future[Set[String]]
 
@@ -74,9 +79,6 @@ abstract class SpanStore extends java.io.Closeable {
    */
   def apply(spans: Seq[Span]): Future[Unit]
 
-  protected def shouldIndex(span: Span): Boolean =
-    !(span.isClientSide() && span.serviceNames.contains("client"))
-
   /**
    * Close writes and await possible draining of internal queues.
    */
@@ -84,9 +86,8 @@ abstract class SpanStore extends java.io.Closeable {
 }
 
 object SpanStore {
-  type Filter = FFilter[Seq[Span], Unit, Seq[Span], Unit]
 
-  /** Allows [[SpanStore]] to be used with a [[Filter]] */
+  /** Allows [[SpanStore]] to be used with a [[com.twitter.finagle.Filter]] */
   implicit def toScalaFunc(s: SpanStore): (Seq[Span] => Future[Unit]) = {
     return (spans: Seq[Span]) => s.apply(spans)
   }
@@ -105,21 +106,20 @@ class InMemorySpanStore extends SpanStore {
 
   private[this] def spansForService(name: String): Seq[Span] =
     spans.filter { span =>
-      shouldIndex(span) &&
       span.serviceNames.exists { _.toLowerCase == name.toLowerCase }
     }.toList
 
   override def close() = {}
 
   override def apply(newSpans: Seq[Span]): Future[Unit] = call {
-    spans ++= newSpans
+    spans ++= newSpans.map(s => s.copy(annotations = s.annotations.sorted))
   }.unit
 
   override def getSpansByTraceIds(traceIds: Seq[Long]): Future[Seq[Seq[Span]]] = call {
     traceIds flatMap { id =>
-      Some(spans.filter { _.traceId == id }.toList).filter { _.length > 0 }
+      Some(spans.filter(_.traceId == id)).filter(_.length > 0)
     }
-  }
+  }.map(_.sortBy(t => t.head.firstTimestamp))
 
   override def getTraceIdsByName(
     serviceName: String,
@@ -137,7 +137,7 @@ class InMemorySpanStore extends SpanStore {
         case Some(ann) => ann.timestamp <= endTs
         case None => false
       }
-    }.filter(shouldIndex).take(limit).map { span =>
+    }.take(limit).map { span =>
       IndexedTraceId(span.traceId, span.lastAnnotation.get.timestamp)
     }.toList
   }
@@ -164,7 +164,7 @@ class InMemorySpanStore extends SpanStore {
             span.annotations.min.timestamp <= endTs &&
             span.annotations.exists { _.value == annotation }
           }
-      }).filter(shouldIndex).take(limit).map { span =>
+      }).take(limit).map { span =>
         IndexedTraceId(span.traceId, span.lastAnnotation.get.timestamp)
       }.toList
     }

@@ -15,13 +15,13 @@
  */
 package com.twitter.zipkin.collector.builder
 
-import java.net.InetSocketAddress
-
+import ch.qos.logback.classic
+import ch.qos.logback.classic.Level
 import com.twitter.finagle.ThriftMux
 import com.twitter.finagle.stats.StatsReceiver
 import com.twitter.logging.Logger
 import com.twitter.ostrich.admin.{RuntimeEnvironment, ServiceTracker}
-import com.twitter.zipkin.builder.{Builder, ZipkinServerBuilder}
+import com.twitter.zipkin.builder.Builder
 import com.twitter.zipkin.collector.filter.{SamplerFilter, ServiceStatsFilter}
 import com.twitter.zipkin.collector.sampler.AdjustableGlobalSampler
 import com.twitter.zipkin.collector.{ScribeCollectorInterface, SpanReceiver, ZipkinCollector}
@@ -30,6 +30,8 @@ import com.twitter.zipkin.config.sampler.{AdaptiveSamplerConfig, AdjustableRateC
 import com.twitter.zipkin.storage.Store
 import com.twitter.zipkin.thriftscala._
 import org.apache.thrift.protocol.TBinaryProtocol.Factory
+import org.slf4j.LoggerFactory
+import java.net.InetSocketAddress
 
 /**
  * Immutable builder for ZipkinCollector
@@ -50,8 +52,12 @@ case class CollectorServiceBuilder[T](
    */
   sampleRateBuilder: Builder[AdjustableRateConfig] = Adjustable.local(1.0),
   adaptiveSamplerBuilder: Option[Builder[AdaptiveSamplerConfig]] = None,
-  serverBuilder: ZipkinServerBuilder = ZipkinServerBuilder(9410, 9900)
+  serverBuilder: ZipkinServerBuilder = ZipkinServerBuilder(9410, 9900),
+  logLevel: String = "INFO"
 ) extends Builder[RuntimeEnvironment => ZipkinCollector] {
+
+  LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME)
+    .asInstanceOf[classic.Logger].setLevel(Level.toLevel(logLevel))
 
   val log = Logger.get()
 
@@ -102,7 +108,7 @@ case class CollectorServiceBuilder[T](
 
   /**
    * Finagle+Scrooge doesn't yet support multiple interfaces on the same socket. This combines
-   * Scribe and DependencySink until they do.
+   * Scribe and DependencyStore until they do.
    */
   private def composeCollectorService(impl: ScribeCollectorInterface, stats: StatsReceiver) = {
     val protocolFactory = new Factory()
@@ -110,9 +116,9 @@ case class CollectorServiceBuilder[T](
     new Scribe$FinagleService(
       impl, protocolFactory, stats, maxThriftBufferSize
     ) {
-      // Add functions from DependencySink until ThriftMux supports multiple interfaces on the
+      // Add functions from DependencyStore until ThriftMux supports multiple interfaces on the
       // same port.
-      functionMap ++= new DependencySink$FinagleService(
+      functionMap ++= new DependencyStore$FinagleService(
         impl, protocolFactory, stats, maxThriftBufferSize
       ) {
         val functions = functionMap // expose
