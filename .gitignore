@@ -1,13 +1,5 @@
-# Gradle
-.gradle
-build/
-
-# Intellij
-.idea/
-*.iml
-*.ipr
-*.iws
-
-# https://github.com/openzipkin/zipkin/issues/534
-zipkin-collector-service/zipkin.db
-/.nb-gradle/
+target
+/sbt-launch.jar
+/zipkin.db
+/bin
+/.gradle
